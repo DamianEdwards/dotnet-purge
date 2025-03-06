@@ -10,7 +10,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>dotnet-purge</ToolCommandName>
     <VersionPrefix>0.0.3</VersionPrefix>
-    <VersionSuffix>pre</VersionSuffix>
+    <!--<VersionSuffix>pre</VersionSuffix>-->
     <Authors>Damian Edwards</Authors>
     <Copyright>Copyright © Damian Edwards</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
