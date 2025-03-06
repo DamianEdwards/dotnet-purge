@@ -27,7 +27,7 @@ Purge the project in the specified directory:
 
 ```bash
 ~/src
-dotnet purge ./MyProject
+$ dotnet purge ./MyProject
 Running 'dotnet clean --configuration Debug --framework net8.0'... done!
 Running 'dotnet clean --configuration Debug --framework net9.0'... done!
 Running 'dotnet clean --configuration Release --framework net8.0'... done!
