@@ -2,6 +2,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.VisualStudio.SolutionPersistence.Serializer;
 
 var targetDir = args.Length > 0 ? args[0] : Directory.GetCurrentDirectory();
 if (!Directory.Exists(targetDir))
@@ -9,46 +10,86 @@ if (!Directory.Exists(targetDir))
     WriteError($"Directory '{targetDir}' does not exist.");
     Environment.Exit(1);
 }
-DotnetCli.WorkingDirectory = Path.GetFullPath(targetDir);
+targetDir = Path.GetFullPath(targetDir);
 
-// Extract properties
-var properties = await DotnetCli.GetProperties(["Configurations", "TargetFrameworks", "BaseIntermediateOutputPath", "BaseOutputPath"]);
-var targetFrameworks = properties["TargetFrameworks"].Split(';');
-var configurations = properties["Configurations"].Split(';');
+// Detect if we are in a solution directory
+string[] slnFileMask = ["*.sln", "*.slnx"];
+var slnFiles =  slnFileMask.SelectMany(new DirectoryInfo(targetDir).EnumerateFiles).ToList();
 
-// Run clean for each configuration
-var isMultiTargeted = targetFrameworks.Length > 1;
-foreach (var configuration in configurations)
+if (slnFiles.Count > 0)
 {
-    if (isMultiTargeted)
+    if (slnFiles.Count > 1)
     {
-        foreach (var framework in targetFrameworks)
+        WriteError($"Multiple solution files found in '{targetDir}'.");
+        Environment.Exit(1);
+    }
+    var projectDirs = await GetProjectDirs(slnFiles[0].FullName);
+    foreach (var projectDir in projectDirs)
+    {
+        await PurgeProject(projectDir);
+    }
+}
+else
+{
+    await PurgeProject(targetDir);
+}
+
+static async Task PurgeProject(string dir)
+{
+    DotnetCli.WorkingDirectory = dir;
+
+    // Extract properties
+    var properties = await DotnetCli.GetProperties(["Configurations", "TargetFrameworks", "BaseIntermediateOutputPath", "BaseOutputPath"]);
+    var targetFrameworks = properties["TargetFrameworks"].Split(';');
+    var configurations = properties["Configurations"].Split(';');
+
+    // Run clean for each configuration
+    var isMultiTargeted = targetFrameworks.Length > 1;
+    foreach (var configuration in configurations)
+    {
+        if (isMultiTargeted)
         {
-            Write($"Running 'dotnet clean --configuration {configuration} --framework {framework}'...");
-            await DotnetCli.Clean(["--configuration", configuration, "--framework", framework]);
+            foreach (var framework in targetFrameworks)
+            {
+                Write($"Running 'dotnet clean --configuration {configuration} --framework {framework}'...");
+                await DotnetCli.Clean(["--configuration", configuration, "--framework", framework]);
+                WriteLine(" done!", ConsoleColor.Green);
+            }
+        }
+        else
+        {
+            Write($"Running 'dotnet clean --configuration {configuration}'...");
+            await DotnetCli.Clean(["--configuration", configuration]);
             WriteLine(" done!", ConsoleColor.Green);
         }
     }
-    else
+
+    // Delete intermediate and output directories
+    var directortiesToDelete = new[] { properties["BaseIntermediateOutputPath"], properties["BaseOutputPath"] };
+
+    foreach (var directory in directortiesToDelete)
     {
-        Write($"Running 'dotnet clean --configuration {configuration}'...");
-        await DotnetCli.Clean(["--configuration", configuration]);
-        WriteLine(" done!", ConsoleColor.Green);
+        var path = Path.GetFullPath(directory, DotnetCli.WorkingDirectory);
+        if (Directory.Exists(path))
+        {
+            Write($"Deleting '{path}'...");
+            Directory.Delete(path, recursive: true);
+            WriteLine(" done!", ConsoleColor.Green);
+        }
     }
 }
 
-// Delete intermediate and output directories
-var directortiesToDelete = new[] { properties["BaseIntermediateOutputPath"], properties["BaseOutputPath"] };
-
-foreach (var directory in directortiesToDelete)
+static async Task<List<string>> GetProjectDirs(string slnFilePath)
 {
-    var path = Path.GetFullPath(directory, DotnetCli.WorkingDirectory);
-    if (Directory.Exists(path))
+    var serializer = SolutionSerializers.Serializers.FirstOrDefault(s => s.IsSupported(slnFilePath));
+    if (serializer is null)
     {
-        Write($"Deleting '{path}'...");
-        Directory.Delete(path, recursive: true);
-        WriteLine(" done!", ConsoleColor.Green);
+        WriteError($"Solution file parsers for file extension '{Path.GetExtension(slnFilePath)}' not found.");
+        Environment.Exit(1);
     }
+    var slnDir = Path.GetDirectoryName(slnFilePath) ?? throw new InvalidOperationException("Solution directory could not be determined.");
+    var solution = await serializer.OpenAsync(slnFilePath, default);
+    return [.. solution.SolutionProjects.Select(p => Path.GetDirectoryName(Path.GetFullPath(p.FilePath, slnDir)))];
 }
 
 static void WriteError(string message) => WriteLine(message, ConsoleColor.Red);
