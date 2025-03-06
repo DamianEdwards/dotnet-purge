@@ -3,12 +3,13 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
     <RootNamespace>dotnet_purge</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackAsTool>true</PackAsTool>
-    <ToolCommandName>purge</ToolCommandName>
-    <VersionPrefix>0.0.2</VersionPrefix>
+    <ToolCommandName>dotnet-purge</ToolCommandName>
+    <VersionPrefix>0.0.3</VersionPrefix>
     <VersionSuffix>pre</VersionSuffix>
     <Authors>Damian Edwards</Authors>
     <Copyright>Copyright © Damian Edwards</Copyright>
