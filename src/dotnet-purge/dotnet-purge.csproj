@@ -8,7 +8,7 @@
     <Nullable>enable</Nullable>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>purge</ToolCommandName>
-    <VersionPrefix>0.0.1</VersionPrefix>
+    <VersionPrefix>0.0.2</VersionPrefix>
     <VersionSuffix>pre</VersionSuffix>
     <Authors>Damian Edwards</Authors>
     <Copyright>Copyright © Damian Edwards</Copyright>
@@ -19,6 +19,7 @@
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <PackageTags>tool rimraf clean purge</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PublishAot Condition=" '$(Configuration)' == 'Debug' ">True</PublishAot>
   </PropertyGroup>
 
   <ItemGroup>
