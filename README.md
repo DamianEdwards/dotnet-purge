@@ -1,6 +1,7 @@
 # dotnet-purge
 
 .NET tool that runs `dotnet clean` for each target framework and configuration and then deletes the intermediate and final output directories.
+Can be run in a directory containing a solution or project file.
 
 ## Installation
 
@@ -10,7 +11,7 @@ dotnet tool install -g dotnet-purge
 
 ## Usage
 
-Purge the project in the current directory:
+Purge the solution/project in the current directory:
 
 ```bash
 ~/src/MyProject
@@ -23,7 +24,7 @@ Deleting '/home/damian/src/MyProject/obj'... done!
 Deleting '/home/damian/src/MyProject/bin'... done!
 ```
 
-Purge the project in the specified directory:
+Purge the solution/project in the specified directory:
 
 ```bash
 ~/src
