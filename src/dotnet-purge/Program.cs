@@ -177,6 +177,7 @@ static class DotnetCli
         // Get configurations first
         var configurations = (await GetProperties(null, [ProjectProperties.Configurations]))[ProjectProperties.Configurations]
             .Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
         var result = new Dictionary<string, Dictionary<string, string>>();
 
         foreach (var configuration in configurations)
@@ -191,7 +192,7 @@ static class DotnetCli
     public static async Task<Dictionary<string, string>> GetProperties(string? configuration, IEnumerable<string> properties)
     {
         var propertiesValue = string.Join(',', properties);
-        string[] arguments = ["msbuild", $"-getProperty:{propertiesValue}"];
+        string[] arguments = ["msbuild", $"-getProperty:{propertiesValue}", "-p:BuildProjectReferences=false"];
         if (configuration is not null)
         {
             arguments = [.. arguments, $"-p:Configuration={configuration}"];
