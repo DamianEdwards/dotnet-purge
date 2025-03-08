@@ -54,14 +54,14 @@ static async Task PurgeProject(string dir)
             foreach (var framework in targetFrameworks)
             {
                 Write($"Running '{dir}{Path.DirectorySeparatorChar}dotnet clean --configuration {configuration} --framework {framework}'...");
-                await DotnetCli.Clean(["--configuration", configuration, "--framework", framework]);
+                await DotnetCli.Clean(["--configuration", configuration, "--framework", framework, "-p:BuildProjectReferences=false"]);
                 WriteLine(" done!", ConsoleColor.Green);
             }
         }
         else
         {
             Write($"Running '{dir}{Path.DirectorySeparatorChar}dotnet clean --configuration {configuration}'...");
-            await DotnetCli.Clean(["--configuration", configuration]);
+            await DotnetCli.Clean(["--configuration", configuration, "-p:BuildProjectReferences=false"]);
             WriteLine(" done!", ConsoleColor.Green);
         }
     }
