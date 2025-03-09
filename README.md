@@ -11,6 +11,27 @@ dotnet tool install -g dotnet-purge
 
 ## Usage
 
+```bash
+dotnet-purge [<TARGETDIR>] [options]
+```
+
+### Arguments
+
+Name  | Description
+------|------------------------------------------------
+&lt;TARGETDIR&gt;  |The directory that contains the solution or project file to purge. If not specified, the current directory will be used.
+
+### Options
+
+Name  | Description
+------|------------------------------------------------
+-?, -h, --help | Show help and usage information
+--version | Show version information
+-r, --recurse | Find projects in sub-directories and purge those too.
+-n, --no-clean | Don't run `dotnet clean` before deleting the output directories.
+
+### Examples
+
 Purge the solution/project in the current directory:
 
 ```bash
@@ -38,7 +59,6 @@ Deleted '/home/damian/src/MyProject/obj/'
 Deleted '/home/damian/src/MyProject/bin/Debug'
 Deleted '/home/damian/src/MyProject/bin/'
 ```
-
 
 ## Add to Windows Explorer
 
