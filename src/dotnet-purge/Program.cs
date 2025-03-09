@@ -1,4 +1,5 @@
 ﻿using System.CommandLine;
+using System.CommandLine.Invocation;
 using System.Diagnostics;
 using System.Reflection;
 using System.Text;
@@ -17,6 +18,12 @@ var rootCommand = new RootCommand("Purges the solution or project in the specifi
     targetArgument
 };
 rootCommand.SetAction(PurgeCommand);
+
+var versionOption = rootCommand.Options.FirstOrDefault(o => o.Name == "--version");
+if (versionOption is not null)
+{
+    versionOption.Action = new VersionOptionAction();
+}
 
 var result = rootCommand.Parse(args);
 var exitCode = await result.InvokeAsync().ConfigureAwait(false);
@@ -342,4 +349,25 @@ internal partial class PurgeJsonContext : JsonSerializerContext
 internal class MsBuildGetPropertyOutput
 {
     public Dictionary<string, string>? Properties { get; set; } = [];
+}
+
+internal sealed class VersionOptionAction : SynchronousCommandLineAction
+{
+    public override int Invoke(ParseResult parseResult)
+    {
+        var assembly = typeof(Program).Assembly;
+        var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrEmpty(informationalVersion))
+        {
+            // Remove the commit hash from the version string
+            var versionParts = informationalVersion.Split('+');
+            parseResult.Configuration.Output.WriteLine(versionParts[0]);
+        }
+        else
+        {
+            parseResult.Configuration.Output.WriteLine(assembly.GetName().Version?.ToString() ?? "<unknown>");
+        }
+
+        return 0;
+    }
 }
