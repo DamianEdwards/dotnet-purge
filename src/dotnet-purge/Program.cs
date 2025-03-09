@@ -1,37 +1,67 @@
-﻿using System.Diagnostics;
+﻿using System.CommandLine;
+using System.CommandLine.Invocation;
+using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.VisualStudio.SolutionPersistence.Serializer;
 
-var targetDir = args.Length > 0 ? args[0] : Directory.GetCurrentDirectory();
-if (!Directory.Exists(targetDir))
+var targetArgument = new Argument<string?>("TARGETDIR")
 {
-    WriteError($"Directory '{targetDir}' does not exist.");
-    Environment.Exit(1);
-}
-targetDir = Path.GetFullPath(targetDir);
+    Description = "The directory that contains the solution or project file to purge. If not specified, the current directory will be used.",
+    Arity = ArgumentArity.ZeroOrOne
+};
 
-// Detect if we are in a solution directory
-string[] slnFileMask = ["*.sln", "*.slnx"];
-var slnFiles =  slnFileMask.SelectMany(new DirectoryInfo(targetDir).EnumerateFiles).ToList();
+var rootCommand = new RootCommand("Purges the solution or project in the specified directory")
+{
+    targetArgument
+};
+rootCommand.SetAction(PurgeCommand);
 
-if (slnFiles.Count > 0)
+var versionOption = rootCommand.Options.FirstOrDefault(o => o.Name == "--version");
+if (versionOption is not null)
 {
-    if (slnFiles.Count > 1)
-    {
-        WriteError($"Multiple solution files found in '{targetDir}'.");
-        Environment.Exit(1);
-    }
-    var projectDirs = await GetProjectDirs(slnFiles[0].FullName);
-    foreach (var projectDir in projectDirs)
-    {
-        await PurgeProject(projectDir);
-    }
+    versionOption.Action = new VersionOptionAction();
 }
-else
+
+var result = rootCommand.Parse(args);
+var exitCode = await result.InvokeAsync().ConfigureAwait(false);
+return exitCode;
+
+async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancellationToken)
 {
-    await PurgeProject(targetDir);
+    var targetDir = parseResult.GetValue(targetArgument) ?? Directory.GetCurrentDirectory();
+    if (!Directory.Exists(targetDir))
+    {
+        parseResult.Configuration.Error.WriteLine($"Directory '{targetDir}' does not exist.");
+        return 1;
+    }
+    targetDir = Path.GetFullPath(targetDir);
+
+    // Detect if we are in a solution directory
+    string[] slnFileMask = ["*.sln", "*.slnx"];
+    var slnFiles = slnFileMask.SelectMany(new DirectoryInfo(targetDir).EnumerateFiles).ToList();
+
+    if (slnFiles.Count > 0)
+    {
+        if (slnFiles.Count > 1)
+        {
+            parseResult.Configuration.Error.WriteLine($"Multiple solution files found in '{targetDir}'.");
+            return 1;
+        }
+        var projectDirs = await GetProjectDirs(slnFiles[0].FullName);
+        foreach (var projectDir in projectDirs)
+        {
+            await PurgeProject(projectDir);
+        }
+    }
+    else
+    {
+        await PurgeProject(targetDir);
+    }
+
+    return 0;
 }
 
 static async Task PurgeProject(string dir)
@@ -299,7 +329,28 @@ internal partial class PurgeJsonContext : JsonSerializerContext
 
 }
 
-public class MsBuildGetPropertyOutput
+internal class MsBuildGetPropertyOutput
 {
     public Dictionary<string, string>? Properties { get; set; } = [];
+}
+
+internal sealed class VersionOptionAction : SynchronousCommandLineAction
+{
+    public override int Invoke(ParseResult parseResult)
+    {
+        var assembly = typeof(Program).Assembly;
+        var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrEmpty(informationalVersion))
+        {
+            // Remove the commit hash from the version string
+            var versionParts = informationalVersion.Split('+');
+            parseResult.Configuration.Output.WriteLine(versionParts[0]);
+        }
+        else
+        {
+            parseResult.Configuration.Output.WriteLine(assembly.GetName().Version?.ToString() ?? "<unknown>");
+        }
+
+        return 0;
+    }
 }
