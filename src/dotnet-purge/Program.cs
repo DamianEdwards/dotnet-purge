@@ -34,7 +34,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     var targetDir = parseResult.GetValue(targetArgument) ?? Directory.GetCurrentDirectory();
     if (!Directory.Exists(targetDir))
     {
-        WriteError($"Directory '{targetDir}' does not exist.");
+        parseResult.Configuration.Error.WriteLine($"Directory '{targetDir}' does not exist.");
         return 1;
     }
     targetDir = Path.GetFullPath(targetDir);
@@ -47,7 +47,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     {
         if (slnFiles.Count > 1)
         {
-            WriteError($"Multiple solution files found in '{targetDir}'.");
+            parseResult.Configuration.Error.WriteLine($"Multiple solution files found in '{targetDir}'.");
             return 1;
         }
         var projectDirs = await GetProjectDirs(slnFiles[0].FullName);
