@@ -170,13 +170,14 @@ static async Task PurgeProject(string dir, bool noClean)
     // Delete the output directories for each configuration
     foreach (var key in properties.Keys)
     {
-        var (configuration, targetFramework) = key;
+        var (configuration, _) = key;
         var outputDirs = properties[key];
 
         // Get the output directories paths
         var dirsToDelete = outputDirs.Values.ToList();
 
         var pathsToDelete = dirsToDelete
+            .Where(d => !string.IsNullOrEmpty(d))
             .Select(d => Path.GetFullPath(d, DotnetCli.WorkingDirectory))
             .Where(d => Directory.Exists(d))
             .OrderDescending()
@@ -185,7 +186,7 @@ static async Task PurgeProject(string dir, bool noClean)
         // Delete the output directories
         foreach (var dirPath in pathsToDelete)
         {
-            if (Directory.Exists(dirPath))
+            if (Directory.Exists(dirPath) && !string.Equals(dir, dirPath, StringComparison.Ordinal))
             {
                 Directory.Delete(dirPath, recursive: true);
                 WriteLine($"Deleted '{dirPath}'");
