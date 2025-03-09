@@ -72,8 +72,11 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
         WriteLine($"({count}/{projectCount}) Purged {dir}");
     }
 
-    WriteLine();
-    WriteLine($"Finished purging {projectCount} projects");
+    if (projectCount > 0)
+    {
+        WriteLine();
+        WriteLine($"Finished purging {projectCount} projects");
+    }
 
     return 0;
 }
@@ -85,7 +88,7 @@ HashSet<string> GetProjectDirs(string path, bool recurse)
     // Find all sub-directories that contain solution or project files
     string[] projectFileMask = ["*.sln", "*.slnx", "*.csproj", "*.vbproj", "*.fsproj", "*.esproj", "*.proj"];
     var projectDirs = projectFileMask
-        .SelectMany(mask => new DirectoryInfo(path).EnumerateFiles(mask, SearchOption.AllDirectories))
+        .SelectMany(mask => new DirectoryInfo(path).EnumerateFiles(mask, recurse ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
         .Select(file => file.DirectoryName)
         .ToList();
 
