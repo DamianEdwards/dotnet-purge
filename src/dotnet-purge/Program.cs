@@ -13,9 +13,23 @@ var targetArgument = new Argument<string?>("TARGETDIR")
     Arity = ArgumentArity.ZeroOrOne
 };
 
-var rootCommand = new RootCommand("Purges the solution or project in the specified directory")
+var recurseOption = new Option<bool>("--recurse", "-r")
 {
-    targetArgument
+    Description = "Find projects in sub-directories and purge those too.",
+    Arity = ArgumentArity.ZeroOrOne
+};
+
+var noCleanOption = new Option<bool>("--no-clean", "-n")
+{
+    Description = "Don't run `dotnet clean` before deleting the output directories.",
+    Arity = ArgumentArity.ZeroOrOne
+};
+
+var rootCommand = new RootCommand("Purges the solution or project in the specified directory.")
+{
+    targetArgument,
+    recurseOption,
+    noCleanOption
 };
 rootCommand.SetAction(PurgeCommand);
 
@@ -31,7 +45,11 @@ return exitCode;
 
 async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancellationToken)
 {
-    var targetDir = parseResult.GetValue(targetArgument) ?? Directory.GetCurrentDirectory();
+    var targetValue = parseResult.GetValue(targetArgument);
+    var recurseValue = parseResult.GetValue(recurseOption);
+    var noCleanValue = parseResult.GetValue(noCleanOption);
+
+    var targetDir = targetValue ?? Directory.GetCurrentDirectory();
     if (!Directory.Exists(targetDir))
     {
         parseResult.Configuration.Error.WriteLine($"Directory '{targetDir}' does not exist.");
@@ -39,52 +57,111 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     }
     targetDir = Path.GetFullPath(targetDir);
 
-    // Detect if we are in a solution directory
-    string[] slnFileMask = ["*.sln", "*.slnx"];
-    var slnFiles = slnFileMask.SelectMany(new DirectoryInfo(targetDir).EnumerateFiles).ToList();
+    var projectDirs = GetProjectDirs(targetDir, recurseValue);
+    var projectCount = projectDirs.Count;
 
-    if (slnFiles.Count > 0)
+    WriteLine($"Found {projectCount} projects to purge");
+    WriteLine();
+
+    var count = 0;
+    foreach (var dir in projectDirs)
     {
-        if (slnFiles.Count > 1)
-        {
-            parseResult.Configuration.Error.WriteLine($"Multiple solution files found in '{targetDir}'.");
-            return 1;
-        }
-        var projectDirs = await GetProjectDirs(slnFiles[0].FullName);
-        foreach (var projectDir in projectDirs)
-        {
-            await PurgeProject(projectDir);
-        }
+        await PurgeProject(dir, noCleanValue);
+        count++;
+
+        WriteLine($"({count}/{projectCount}) Purged {dir}");
     }
-    else
-    {
-        await PurgeProject(targetDir);
-    }
+
+    WriteLine();
+    WriteLine($"Finished purging {projectCount} projects");
 
     return 0;
 }
 
-static async Task PurgeProject(string dir)
+HashSet<string> GetProjectDirs(string path, bool recurse)
+{
+    var result = new HashSet<string>();
+
+    // Find all sub-directories that contain solution or project files
+    string[] projectFileMask = ["*.sln", "*.slnx", "*.csproj", "*.vbproj", "*.fsproj", "*.esproj", "*.proj"];
+    var projectDirs = projectFileMask
+        .SelectMany(mask => new DirectoryInfo(path).EnumerateFiles(mask, SearchOption.AllDirectories))
+        .Select(file => file.DirectoryName)
+        .ToList();
+
+    foreach (var dir in projectDirs)
+    {
+        if (!string.IsNullOrEmpty(dir))
+        {
+            AddProjectDirs(dir, result);
+        }
+    }
+
+    return result;
+}
+
+async void AddProjectDirs(string path, HashSet<string> dirs)
+{
+    // Detect if we are in a solution directory
+    string[] slnFileMask = ["*.sln", "*.slnx"];
+    var slnFiles = slnFileMask.SelectMany(new DirectoryInfo(path).EnumerateFiles).ToList();
+
+    if (slnFiles.Count > 0)
+    {
+        // If we are in a solution directory, add the project directories to the list
+        foreach (var slnFile in slnFiles)
+        {
+            var projectDirs = await GetSlnProjectDirs(slnFiles[0].FullName);
+            foreach (var projectDir in projectDirs)
+            {
+                dirs.Add(projectDir);
+            }
+        }
+    }
+    else
+    {
+        // Just add the directory to the list
+        dirs.Add(path);
+    }
+}
+
+static async Task<List<string>> GetSlnProjectDirs(string slnFilePath)
+{
+    var serializer = SolutionSerializers.Serializers.FirstOrDefault(s => s.IsSupported(slnFilePath));
+    if (serializer is null)
+    {
+        WriteError($"Solution file parsers for file extension '{Path.GetExtension(slnFilePath)}' not found.");
+        Environment.Exit(1);
+    }
+    var slnDir = Path.GetDirectoryName(slnFilePath) ?? throw new InvalidOperationException("Solution directory could not be determined.");
+    var solution = await serializer.OpenAsync(slnFilePath, default);
+    return [.. solution.SolutionProjects.Select(p => Path.GetDirectoryName(Path.GetFullPath(p.FilePath, slnDir)))];
+}
+
+static async Task PurgeProject(string dir, bool noClean)
 {
     DotnetCli.WorkingDirectory = dir;
 
     // Extract properties
     var properties = await DotnetCli.GetProperties(ProjectProperties.AllOutputDirs);
 
-    // Run `dotnet clean` for each configuration
-    foreach (var key in properties.Keys)
+    if (!noClean)
     {
-        var (configuration, targetFramework) = key;
-
-        string[] cleanArgs = ["--configuration", configuration, "-p:BuildProjectReferences=false"];
-        if (targetFramework is not null)
+        // Run `dotnet clean` for each configuration
+        foreach (var key in properties.Keys)
         {
-            cleanArgs = [.. cleanArgs, "--framework", targetFramework];
-        }
+            var (configuration, targetFramework) = key;
 
-        Write($"Running '{dir}{Path.DirectorySeparatorChar}dotnet clean {string.Join(' ', cleanArgs)}'...");
-        await DotnetCli.Clean(cleanArgs);
-        WriteLine(" done!", ConsoleColor.Green);
+            string[] cleanArgs = ["--configuration", configuration, "-p:BuildProjectReferences=false"];
+            if (targetFramework is not null)
+            {
+                cleanArgs = [.. cleanArgs, "--framework", targetFramework];
+            }
+
+            Write($"Running '{dir}{Path.DirectorySeparatorChar}dotnet clean {string.Join(' ', cleanArgs)}'...");
+            await DotnetCli.Clean(cleanArgs);
+            WriteLine(" done!", ConsoleColor.Green);
+        }
     }
 
     // Delete the output directories for each configuration
@@ -131,28 +208,18 @@ static void DeleteEmptyParentDirectories(string path)
     }
 }
 
-static async Task<List<string>> GetProjectDirs(string slnFilePath)
-{
-    var serializer = SolutionSerializers.Serializers.FirstOrDefault(s => s.IsSupported(slnFilePath));
-    if (serializer is null)
-    {
-        WriteError($"Solution file parsers for file extension '{Path.GetExtension(slnFilePath)}' not found.");
-        Environment.Exit(1);
-    }
-    var slnDir = Path.GetDirectoryName(slnFilePath) ?? throw new InvalidOperationException("Solution directory could not be determined.");
-    var solution = await serializer.OpenAsync(slnFilePath, default);
-    return [.. solution.SolutionProjects.Select(p => Path.GetDirectoryName(Path.GetFullPath(p.FilePath, slnDir)))];
-}
-
 static void WriteError(string message) => WriteLine(message, ConsoleColor.Red);
 
-static void WriteLine(string message, ConsoleColor? color = default)
+static void WriteLine(string? message = null, ConsoleColor? color = default)
 {
-    Write(message, color);
+    if (!string.IsNullOrEmpty(message))
+    {
+        Write(message, color);
+    }
     Console.WriteLine();
 }
 
-static void Write(string message, ConsoleColor? color = default)
+static void Write(string? message = null, ConsoleColor? color = default)
 {
     if (color is not null)
     {
