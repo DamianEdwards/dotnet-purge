@@ -39,62 +39,53 @@ static async Task PurgeProject(string dir)
     DotnetCli.WorkingDirectory = dir;
 
     // Extract properties
-    var properties = await DotnetCli.GetProperties(ProjectProperties.All);
+    var properties = await DotnetCli.GetProperties(ProjectProperties.AllOutputDirs);
 
     // Run `dotnet clean` for each configuration
-    foreach (var configuration in properties.Keys)
+    foreach (var key in properties.Keys)
     {
-        var configurationProperties = properties[configuration];
-        var targetFrameworks = configurationProperties[ProjectProperties.TargetFrameworks].Split(';');
+        var (configuration, targetFramework) = key;
 
-        var isMultiTargeted = targetFrameworks.Length > 1;
-        if (isMultiTargeted)
+        string[] cleanArgs = ["--configuration", configuration, "-p:BuildProjectReferences=false"];
+        if (targetFramework is not null)
         {
-            // Run clean for each target framework
-            foreach (var framework in targetFrameworks)
-            {
-                Write($"Running '{dir}{Path.DirectorySeparatorChar}dotnet clean --configuration {configuration} --framework {framework}'...");
-                await DotnetCli.Clean(["--configuration", configuration, "--framework", framework, "-p:BuildProjectReferences=false"]);
-                WriteLine(" done!", ConsoleColor.Green);
-            }
+            cleanArgs = [.. cleanArgs, "--framework", targetFramework];
         }
-        else
-        {
-            Write($"Running '{dir}{Path.DirectorySeparatorChar}dotnet clean --configuration {configuration}'...");
-            await DotnetCli.Clean(["--configuration", configuration, "-p:BuildProjectReferences=false"]);
-            WriteLine(" done!", ConsoleColor.Green);
-        }
+
+        Write($"Running '{dir}{Path.DirectorySeparatorChar}dotnet clean {string.Join(' ', cleanArgs)}'...");
+        await DotnetCli.Clean(cleanArgs);
+        WriteLine(" done!", ConsoleColor.Green);
     }
 
     // Delete the output directories for each configuration
-    foreach (var configuration in properties.Keys)
+    foreach (var key in properties.Keys)
     {
-        var configurationProperties = properties[configuration];
+        var (configuration, targetFramework) = key;
+        var outputDirs = properties[key];
 
         // Get the output directories paths
-        var directortiesToDelete = new[] {
-            configurationProperties[ProjectProperties.PackageOutputPath],
-            configurationProperties[ProjectProperties.PublishDir],
-            configurationProperties[ProjectProperties.BaseOutputPath],
-            configurationProperties[ProjectProperties.BaseIntermediateOutputPath]
-        };
+        var dirsToDelete = outputDirs.Values.ToList();
+
+        var pathsToDelete = dirsToDelete
+            .Select(d => Path.GetFullPath(d, DotnetCli.WorkingDirectory))
+            .Where(d => Directory.Exists(d))
+            .OrderDescending()
+            .ToList();
 
         // Delete the output directories
-        Parallel.ForEach(directortiesToDelete, directory =>
+        foreach (var dirPath in pathsToDelete)
         {
-            var path = Path.GetFullPath(directory, DotnetCli.WorkingDirectory);
-
-            if (Directory.Exists(path))
+            if (Directory.Exists(dirPath))
             {
-                Directory.Delete(path, recursive: true);
-                WriteLine($"Deleted '{path}'");
+                Directory.Delete(dirPath, recursive: true);
+                WriteLine($"Deleted '{dirPath}'");
             }
-        });
+        }
 
         // Check if output directories parent directories are now empty and delete them recursively
-        foreach (var directory in directortiesToDelete)
+        foreach (var dirPath in pathsToDelete)
         {
-            DeleteEmptyParentDirectories(directory);
+            DeleteEmptyParentDirectories(dirPath);
         }
     }
 }
@@ -156,6 +147,7 @@ static class ProjectProperties
     public readonly static string PublishDir = nameof(PublishDir);
 
     public readonly static string[] All = [Configurations, TargetFrameworks, BaseIntermediateOutputPath, BaseOutputPath, PackageOutputPath, PublishDir];
+    public readonly static string[] AllOutputDirs = [BaseIntermediateOutputPath, BaseOutputPath, PackageOutputPath, PublishDir];
 }
 
 static class DotnetCli
@@ -172,31 +164,56 @@ static class DotnetCli
         return process.WaitForExitAsync();
     }
 
-    public static async Task<Dictionary<string, Dictionary<string, string>>> GetProperties(IEnumerable<string> properties)
+    public static async Task<Dictionary<(string Configuration, string? TargetFramework), Dictionary<string, string>>> GetProperties(IEnumerable<string> properties)
     {
         // Get configurations first
-        var configurations = (await GetProperties(null, [ProjectProperties.Configurations]))[ProjectProperties.Configurations]
+        var configurations = (await GetProperties(null, null, [ProjectProperties.Configurations]))[ProjectProperties.Configurations]
             .Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
-        var result = new Dictionary<string, Dictionary<string, string>>();
+        string[]? targetFrameworks = null;
+        var targetFrameworksProps = (await GetProperties(null, null, [ProjectProperties.TargetFrameworks]));
+        if (targetFrameworksProps.TryGetValue(ProjectProperties.TargetFrameworks, out var value) && !string.IsNullOrEmpty(value))
+        {
+            targetFrameworks = value.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        }
+        var isMultiTargeted = targetFrameworks?.Length > 1;
+
+        var result = new Dictionary<(string Configuration, string? TargetFramework), Dictionary<string, string>>();
 
         foreach (var configuration in configurations)
         {
-            var configurationProperties = await GetProperties(configuration, properties);
-            result[configuration] = configurationProperties;
+            if (isMultiTargeted)
+            {
+                foreach (var targetFramework in targetFrameworks!)
+                {
+                    var configurationProperties = await GetProperties(configuration, targetFramework, properties);
+                    result[(configuration, targetFramework)] = configurationProperties;
+                }
+            }
+            else
+            {
+                var configurationProperties = await GetProperties(configuration, null, properties);
+                result[(configuration, null)] = configurationProperties;
+            }
         }
 
         return result;
     }
 
-    public static async Task<Dictionary<string, string>> GetProperties(string? configuration, IEnumerable<string> properties)
+    public static async Task<Dictionary<string, string>> GetProperties(string? configuration, string? targetFramework, IEnumerable<string> properties)
     {
         var propertiesValue = string.Join(',', properties);
         string[] arguments = ["msbuild", $"-getProperty:{propertiesValue}", "-p:BuildProjectReferences=false"];
+
         if (configuration is not null)
         {
             arguments = [.. arguments, $"-p:Configuration={configuration}"];
         }
+        if (targetFramework is not null)
+        {
+            arguments = [.. arguments, $"-p:TargetFramework={targetFramework}"];
+        }
+
         var startInfo = GetProcessStartInfo(arguments);
         startInfo.RedirectStandardOutput = true;
         startInfo.RedirectStandardError = true;
