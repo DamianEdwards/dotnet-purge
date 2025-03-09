@@ -248,16 +248,16 @@ static async Task<string?> DetectNewerVersion()
     }
 
     var versionComparer = new VersionComparer();
-    SemanticVersion? latestVersion = null;
+    var latestVersion = currentVersion;
     foreach (var versionValue in versions.Versions)
     {
-        if (SemanticVersion.TryParse(versionValue, out var version) && version > currentVersion)
+        if (SemanticVersion.TryParse(versionValue, out var version) && version > latestVersion)
         {
             latestVersion = version;
         }
     }
 
-    return latestVersion?.ToString();
+    return latestVersion > currentVersion ? latestVersion.ToString() : null;
 }
 
 static void WriteError(string message) => WriteLine(message, ConsoleColor.Red);
