@@ -31,23 +31,6 @@ return exitCode;
 
 async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancellationToken)
 {
-    if (parseResult.GetValue<bool>("--version"))
-    {
-        var assembly = typeof(Program).Assembly;
-        var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-        if (!string.IsNullOrEmpty(informationalVersion))
-        {
-            // Remove the commit hash from the version string
-            var versionParts = informationalVersion.Split('+');
-            WriteLine(versionParts[0]);
-        }
-        else
-        {
-            WriteLine(assembly.GetName().Version?.ToString() ?? "<unknown>");
-        }
-        return 0;
-    }
-
     var targetDir = parseResult.GetValue(targetArgument) ?? Directory.GetCurrentDirectory();
     if (!Directory.Exists(targetDir))
     {
