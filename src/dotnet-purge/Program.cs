@@ -1,11 +1,15 @@
 ﻿using System.CommandLine;
 using System.CommandLine.Invocation;
 using System.Diagnostics;
+using System.Net.Http.Json;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.VisualStudio.SolutionPersistence.Serializer;
+using NuGet.Versioning;
+
+var detectNewerVersionTask = DetectNewerVersion();
 
 var targetArgument = new Argument<string?>("TARGETDIR")
 {
@@ -40,7 +44,21 @@ if (versionOption is not null)
 }
 
 var result = rootCommand.Parse(args);
-var exitCode = await result.InvokeAsync().ConfigureAwait(false);
+var exitCode = await result.InvokeAsync();
+
+try
+{
+    var newerVersion = await detectNewerVersionTask;
+    if (newerVersion is not null)
+    {
+        // TODO: Handle case when newer version is a pre-release version
+        WriteLine();
+        WriteLine($"A newer version ({newerVersion}) of dotnet-purge is available!", ConsoleColor.Yellow);
+        WriteLine("Update by running 'dotnet tool update -g dotnet-purge'", ConsoleColor.Green);
+    }
+}
+catch (Exception) { }
+
 return exitCode;
 
 async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancellationToken)
@@ -210,6 +228,36 @@ static void DeleteEmptyParentDirectories(string path)
         WriteLine($"Deleted '{dir.FullName}'");
         dir = dir.Parent;
     }
+}
+
+static async Task<string?> DetectNewerVersion()
+{
+    var currentVersionValue = VersionOptionAction.GetCurrentVersion();
+    if (currentVersionValue is null || !SemanticVersion.TryParse(currentVersionValue, out var currentVersion))
+    {
+        return null;
+    }
+
+    var packageUrl = "https://api.nuget.org/v3-flatcontainer/dotnet-purge/index.json";
+    using var httpClient = new HttpClient();
+    var versions = await httpClient.GetFromJsonAsync(packageUrl, PurgeJsonContext.Default.NuGetVersions);
+
+    if (versions?.Versions is null || versions.Versions.Length == 0)
+    {
+        return null;
+    }
+
+    var versionComparer = new VersionComparer();
+    var latestVersion = currentVersion;
+    foreach (var versionValue in versions.Versions)
+    {
+        if (SemanticVersion.TryParse(versionValue, out var version) && version > latestVersion)
+        {
+            latestVersion = version;
+        }
+    }
+
+    return latestVersion > currentVersion ? latestVersion.ToString() : null;
 }
 
 static void WriteError(string message) => WriteLine(message, ConsoleColor.Red);
@@ -395,6 +443,7 @@ static class DotnetCli
 }
 
 [JsonSerializable(typeof(MsBuildGetPropertyOutput))]
+[JsonSerializable(typeof(NuGetVersions))]
 internal partial class PurgeJsonContext : JsonSerializerContext
 {
 
@@ -405,9 +454,23 @@ internal class MsBuildGetPropertyOutput
     public Dictionary<string, string>? Properties { get; set; } = [];
 }
 
+internal class NuGetVersions
+{
+    [JsonPropertyName("versions")]
+    public string[] Versions { get; set; } = [];
+}
+
 internal sealed class VersionOptionAction : SynchronousCommandLineAction
 {
     public override int Invoke(ParseResult parseResult)
+    {
+        var currentVersion = GetCurrentVersion();
+        parseResult.Configuration.Output.WriteLine(currentVersion ?? "<unknown>");
+
+        return 0;
+    }
+
+    public static string? GetCurrentVersion()
     {
         var assembly = typeof(Program).Assembly;
         var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
@@ -415,13 +478,9 @@ internal sealed class VersionOptionAction : SynchronousCommandLineAction
         {
             // Remove the commit hash from the version string
             var versionParts = informationalVersion.Split('+');
-            parseResult.Configuration.Output.WriteLine(versionParts[0]);
-        }
-        else
-        {
-            parseResult.Configuration.Output.WriteLine(assembly.GetName().Version?.ToString() ?? "<unknown>");
+            return versionParts[0];
         }
 
-        return 0;
+        return assembly.GetName().Version?.ToString();
     }
 }

@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "dotnet-purge": {
+      "commandName": "Project",
+      "commandLineArgs": "--recurse",
+      "workingDirectory": "..\\..\\tests\\testprojects"
+    }
+  }
+}
