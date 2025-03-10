@@ -9,8 +9,6 @@ using System.Text.Json.Serialization;
 using Microsoft.VisualStudio.SolutionPersistence.Serializer;
 using NuGet.Versioning;
 
-var detectNewerVersionTask = DetectNewerVersion();
-
 var targetArgument = new Argument<string?>("TARGETDIR")
 {
     Description = "The directory that contains the solution or project file to purge. If not specified, the current directory will be used.",
@@ -46,23 +44,12 @@ if (versionOption is not null)
 var result = rootCommand.Parse(args);
 var exitCode = await result.InvokeAsync();
 
-try
-{
-    var newerVersion = await detectNewerVersionTask;
-    if (newerVersion is not null)
-    {
-        // TODO: Handle case when newer version is a pre-release version
-        WriteLine();
-        WriteLine($"A newer version ({newerVersion}) of dotnet-purge is available!", ConsoleColor.Yellow);
-        WriteLine("Update by running 'dotnet tool update -g dotnet-purge'", ConsoleColor.Green);
-    }
-}
-catch (Exception) { }
-
 return exitCode;
 
 async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancellationToken)
 {
+    var detectNewerVersionTask = Task.Run(() => DetectNewerVersion(cancellationToken), cancellationToken);
+
     var targetValue = parseResult.GetValue(targetArgument);
     var recurseValue = parseResult.GetValue(recurseOption);
     var noCleanValue = parseResult.GetValue(noCleanOption);
@@ -75,96 +62,152 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     }
     targetDir = Path.GetFullPath(targetDir);
 
-    var projectDirs = GetProjectDirs(targetDir, recurseValue);
+    var projectDirs = await GetProjectDirs(targetDir, recurseValue, cancellationToken);
     var projectCount = projectDirs.Count;
 
     WriteLine($"Found {projectCount} projects to purge");
     WriteLine();
 
-    var count = 0;
+    var succeded = 0;
+    var failed = 0;
+    var cancelled = 0;
     foreach (var dir in projectDirs)
     {
-        await PurgeProject(dir, noCleanValue);
-        count++;
+        if (cancellationToken.IsCancellationRequested)
+        {
+            break;
+        }
 
-        WriteLine($"({count}/{projectCount}) Purged {dir}");
+        try
+        {
+            await PurgeProject(dir, noCleanValue, cancellationToken);
+            succeded++;
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled++;
+            break;
+        }
+        catch (Exception ex)
+        {
+            WriteError(
+                $$"""
+                Failed to purge project at path: {{dir}}
+                {{ex.Message}}
+                """);
+            failed++;
+            continue;
+        }
+
+        WriteLine($"({succeded}/{projectCount}) Purged {dir}");
     }
 
-    if (projectCount > 0)
+    var operationCancelled = cancelled > 0 || cancellationToken.IsCancellationRequested;
+
+    if (succeded > 0)
     {
         WriteLine();
-        WriteLine($"Finished purging {projectCount} projects");
+        WriteLine($"Finished purging {succeded} projects", ConsoleColor.Green);
     }
 
-    return 0;
+    if (cancelled > 0)
+    {
+        WriteLine();
+        WriteLine($"Cancelled purging {cancelled} projects", ConsoleColor.Yellow);
+    }
+
+    if (failed > 0)
+    {
+        WriteLine();
+        WriteLine($"Failed purging {failed} projects", ConsoleColor.Red);
+    }
+
+    // Process the detect newer version task
+    try
+    {
+        var newerVersion = await detectNewerVersionTask;
+        if (newerVersion is not null)
+        {
+            // TODO: Handle case when newer version is a pre-release version
+            WriteLine();
+            WriteLine($"A newer version ({newerVersion}) of dotnet-purge is available!", ConsoleColor.Yellow);
+            WriteLine("Update by running 'dotnet tool update -g dotnet-purge'", ConsoleColor.Green);
+        }
+    }
+    catch (Exception)
+    {
+        // Ignore exceptions from the detect newer version task
+    }
+
+    if (operationCancelled)
+    {
+        WriteLine();
+        WriteLine("Operation cancelled", ConsoleColor.Yellow);
+    }
+
+    return failed > 0 || operationCancelled ? 1 : 0;
 }
 
-HashSet<string> GetProjectDirs(string path, bool recurse)
+async Task<HashSet<string>> GetProjectDirs(string path, bool recurse, CancellationToken cancellationToken)
 {
     var result = new HashSet<string>();
 
     // Find all sub-directories that contain solution or project files
     string[] projectFileMask = ["*.sln", "*.slnx", "*.csproj", "*.vbproj", "*.fsproj", "*.esproj", "*.proj"];
-    var projectDirs = projectFileMask
-        .SelectMany(mask => new DirectoryInfo(path).EnumerateFiles(mask, recurse ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
-        .Select(file => file.DirectoryName)
-        .ToList();
 
-    foreach (var dir in projectDirs)
+    foreach (var fileMask in projectFileMask)
     {
-        if (!string.IsNullOrEmpty(dir))
+        if (cancellationToken.IsCancellationRequested)
         {
-            AddProjectDirs(dir, result);
+            break;
+        }
+
+        var searchOption = recurse ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+        var files = new DirectoryInfo(path).EnumerateFiles(fileMask, searchOption);
+        foreach (var file in files)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (file.Extension == ".sln" || file.Extension == ".slnx")
+            {
+                var projectDirs = await GetSlnProjectDirs(file.FullName, cancellationToken);
+                foreach (var projectDir in projectDirs)
+                {
+                    result.Add(projectDir);
+                }
+            }
+            else
+            {
+                var dir = file.DirectoryName;
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    result.Add(dir);
+                }
+            }
         }
     }
 
     return result;
 }
 
-async void AddProjectDirs(string path, HashSet<string> dirs)
+static async Task<List<string>> GetSlnProjectDirs(string slnFilePath, CancellationToken cancellationToken)
 {
-    // Detect if we are in a solution directory
-    string[] slnFileMask = ["*.sln", "*.slnx"];
-    var slnFiles = slnFileMask.SelectMany(new DirectoryInfo(path).EnumerateFiles).ToList();
-
-    if (slnFiles.Count > 0)
-    {
-        // If we are in a solution directory, add the project directories to the list
-        foreach (var slnFile in slnFiles)
-        {
-            var projectDirs = await GetSlnProjectDirs(slnFiles[0].FullName);
-            foreach (var projectDir in projectDirs)
-            {
-                dirs.Add(projectDir);
-            }
-        }
-    }
-    else
-    {
-        // Just add the directory to the list
-        dirs.Add(path);
-    }
-}
-
-static async Task<List<string>> GetSlnProjectDirs(string slnFilePath)
-{
-    var serializer = SolutionSerializers.Serializers.FirstOrDefault(s => s.IsSupported(slnFilePath));
-    if (serializer is null)
-    {
-        WriteError($"Solution file parsers for file extension '{Path.GetExtension(slnFilePath)}' not found.");
-        Environment.Exit(1);
-    }
-    var slnDir = Path.GetDirectoryName(slnFilePath) ?? throw new InvalidOperationException("Solution directory could not be determined.");
-    var solution = await serializer.OpenAsync(slnFilePath, default);
+    var serializer = SolutionSerializers.Serializers.FirstOrDefault(s => s.IsSupported(slnFilePath))
+        ?? throw new InvalidOperationException($"A solution file parser for file extension '{Path.GetExtension(slnFilePath)}' could not be not found.");
+    var slnDir = Path.GetDirectoryName(slnFilePath) ?? throw new InvalidOperationException($"Solution directory could not be determined for path '{slnFilePath}'");
+    var solution = await serializer.OpenAsync(slnFilePath, cancellationToken);
     return [.. solution.SolutionProjects.Select(p => Path.GetDirectoryName(Path.GetFullPath(p.FilePath, slnDir)))];
 }
 
-static async Task PurgeProject(string dir, bool noClean)
+static async Task PurgeProject(string dir, bool noClean, CancellationToken cancellationToken)
 {
     DotnetCli.WorkingDirectory = dir;
 
     // Extract properties
-    var properties = await DotnetCli.GetProperties(ProjectProperties.AllOutputDirs);
+    var properties = await DotnetCli.GetProperties(ProjectProperties.AllOutputDirs, cancellationToken);
 
     if (!noClean)
     {
@@ -230,7 +273,7 @@ static void DeleteEmptyParentDirectories(string path)
     }
 }
 
-static async Task<string?> DetectNewerVersion()
+static async Task<string?> DetectNewerVersion(CancellationToken cancellationToken)
 {
     var currentVersionValue = VersionOptionAction.GetCurrentVersion();
     if (currentVersionValue is null || !SemanticVersion.TryParse(currentVersionValue, out var currentVersion))
@@ -240,7 +283,7 @@ static async Task<string?> DetectNewerVersion()
 
     var packageUrl = "https://api.nuget.org/v3-flatcontainer/dotnet-purge/index.json";
     using var httpClient = new HttpClient();
-    var versions = await httpClient.GetFromJsonAsync(packageUrl, PurgeJsonContext.Default.NuGetVersions);
+    var versions = await httpClient.GetFromJsonAsync(packageUrl, PurgeJsonContext.Default.NuGetVersions, cancellationToken: cancellationToken);
 
     if (versions?.Versions is null || versions.Versions.Length == 0)
     {
@@ -251,6 +294,11 @@ static async Task<string?> DetectNewerVersion()
     var latestVersion = currentVersion;
     foreach (var versionValue in versions.Versions)
     {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            break;
+        }
+
         if (SemanticVersion.TryParse(versionValue, out var version) && version > latestVersion)
         {
             latestVersion = version;
@@ -313,14 +361,15 @@ static class DotnetCli
         return process.WaitForExitAsync();
     }
 
-    public static async Task<Dictionary<(string Configuration, string? TargetFramework), Dictionary<string, string>>> GetProperties(IEnumerable<string> properties)
+    public static async Task<Dictionary<(string Configuration, string? TargetFramework), Dictionary<string, string>>> GetProperties(IEnumerable<string> properties, CancellationToken cancellationToken)
     {
         // Get configurations first
-        var configurations = (await GetProperties(null, null, [ProjectProperties.Configurations]))[ProjectProperties.Configurations]
+        var configurations = (await GetProperties(null, null, [ProjectProperties.Configurations], cancellationToken))[ProjectProperties.Configurations]
             .Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
+        // Detect multi-targeting
         string[]? targetFrameworks = null;
-        var targetFrameworksProps = (await GetProperties(null, null, [ProjectProperties.TargetFrameworks]));
+        var targetFrameworksProps = (await GetProperties(null, null, [ProjectProperties.TargetFrameworks], cancellationToken));
         if (targetFrameworksProps.TryGetValue(ProjectProperties.TargetFrameworks, out var value) && !string.IsNullOrEmpty(value))
         {
             targetFrameworks = value.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
@@ -335,13 +384,13 @@ static class DotnetCli
             {
                 foreach (var targetFramework in targetFrameworks!)
                 {
-                    var configurationProperties = await GetProperties(configuration, targetFramework, properties);
+                    var configurationProperties = await GetProperties(configuration, targetFramework, properties, cancellationToken);
                     result[(configuration, targetFramework)] = configurationProperties;
                 }
             }
             else
             {
-                var configurationProperties = await GetProperties(configuration, null, properties);
+                var configurationProperties = await GetProperties(configuration, null, properties, cancellationToken);
                 result[(configuration, null)] = configurationProperties;
             }
         }
@@ -349,7 +398,7 @@ static class DotnetCli
         return result;
     }
 
-    public static async Task<Dictionary<string, string>> GetProperties(string? configuration, string? targetFramework, IEnumerable<string> properties)
+    public static async Task<Dictionary<string, string>> GetProperties(string? configuration, string? targetFramework, IEnumerable<string> properties, CancellationToken cancellationToken)
     {
         var propertiesValue = string.Join(',', properties);
         string[] arguments = ["msbuild", $"-getProperty:{propertiesValue}", "-p:BuildProjectReferences=false"];
@@ -389,23 +438,29 @@ static class DotnetCli
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        await process.WaitForExitAsync();
+        await process.WaitForExitAsync(cancellationToken);
 
         if (process.ExitCode != 0)
         {
-            Console.Write(stderr.ToString());
-            Console.Write(stdout.ToString());
-            Environment.Exit(process.ExitCode);
+            throw new InvalidOperationException(
+                $$"""
+                Error evaluating project properties at path: '{{WorkingDirectory}}'.
+                Process exited with code: {{process.ExitCode}}
+                Stdout:
+                    {{stdout}}
+                Stderr:
+                    {{stderr}}
+                """);
         }
 
-        var stringOutput = stdout.ToString();
+        var stringOutput = stdout.ToString().Trim();
         if (properties.Count() > 1)
         {
             var output = JsonSerializer.Deserialize(stringOutput, PurgeJsonContext.Default.MsBuildGetPropertyOutput);
             return output?.Properties ?? [];
         }
 
-        return new() { { properties.First().Trim(), stringOutput } };
+        return new() { { properties.First(), stringOutput } };
     }
 
     private static Process Start(IEnumerable<string> arguments) => Start(GetProcessStartInfo(arguments));
