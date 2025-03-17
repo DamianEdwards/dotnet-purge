@@ -68,7 +68,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     WriteLine($"Found {projectCount} projects to purge");
     WriteLine();
 
-    if (projectCount == 0)
+    if (projectCount == 0 && !recurseValue)
     {
         WriteLine("Use --recurse to search for projects in sub-directories.", ConsoleColor.DarkBlue);
     }
