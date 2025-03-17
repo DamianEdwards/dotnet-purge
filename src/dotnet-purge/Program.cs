@@ -62,25 +62,32 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     }
     targetDir = Path.GetFullPath(targetDir);
 
-    var projectDirs = await GetProjectDirs(targetDir, recurseValue, cancellationToken);
-    var projectCount = projectDirs.Count;
+    var projectFiles = await GetProjectFiles(targetDir, recurseValue, cancellationToken);
+    var projectCount = projectFiles.Count;
 
     WriteLine($"Found {projectCount} projects to purge");
     WriteLine();
 
+    if (projectCount == 0)
+    {
+        WriteLine("Use --recurse to search for projects in sub-directories.", ConsoleColor.DarkBlue);
+    }
+
     var succeded = 0;
     var failed = 0;
     var cancelled = 0;
-    foreach (var dir in projectDirs)
+    foreach (var projectFile in projectFiles)
     {
         if (cancellationToken.IsCancellationRequested)
         {
+            var remaining = projectCount - succeded - failed - cancelled;
+            cancelled += remaining;
             break;
         }
 
         try
         {
-            await PurgeProject(dir, noCleanValue, cancellationToken);
+            await PurgeProject(projectFile, targetDir, noCleanValue, cancellationToken);
             succeded++;
         }
         catch (OperationCanceledException)
@@ -92,14 +99,14 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
         {
             WriteError(
                 $$"""
-                Failed to purge project at path: {{dir}}
+                Failed to purge project at path: {{projectFile}}
                 {{ex.Message}}
                 """);
             failed++;
             continue;
         }
 
-        WriteLine($"({succeded}/{projectCount}) Purged {dir}");
+        WriteLine($"({succeded}/{projectCount}) Purged {projectFile}");
     }
 
     var operationCancelled = cancelled > 0 || cancellationToken.IsCancellationRequested;
@@ -148,7 +155,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     return failed > 0 || operationCancelled ? 1 : 0;
 }
 
-async Task<HashSet<string>> GetProjectDirs(string path, bool recurse, CancellationToken cancellationToken)
+async Task<HashSet<string>> GetProjectFiles(string path, bool recurse, CancellationToken cancellationToken)
 {
     var result = new HashSet<string>();
 
@@ -173,19 +180,15 @@ async Task<HashSet<string>> GetProjectDirs(string path, bool recurse, Cancellati
 
             if (file.Extension == ".sln" || file.Extension == ".slnx")
             {
-                var projectDirs = await GetSlnProjectDirs(file.FullName, cancellationToken);
-                foreach (var projectDir in projectDirs)
+                var projectFiles = await GetSlnProjectFiles(file.FullName, cancellationToken);
+                foreach (var projectFile in projectFiles)
                 {
-                    result.Add(projectDir);
+                    result.Add(projectFile);
                 }
             }
             else
             {
-                var dir = file.DirectoryName;
-                if (!string.IsNullOrEmpty(dir))
-                {
-                    result.Add(dir);
-                }
+                result.Add(file.FullName);
             }
         }
     }
@@ -193,21 +196,21 @@ async Task<HashSet<string>> GetProjectDirs(string path, bool recurse, Cancellati
     return result;
 }
 
-static async Task<List<string>> GetSlnProjectDirs(string slnFilePath, CancellationToken cancellationToken)
+static async Task<List<string>> GetSlnProjectFiles(string slnFilePath, CancellationToken cancellationToken)
 {
     var serializer = SolutionSerializers.Serializers.FirstOrDefault(s => s.IsSupported(slnFilePath))
         ?? throw new InvalidOperationException($"A solution file parser for file extension '{Path.GetExtension(slnFilePath)}' could not be not found.");
     var slnDir = Path.GetDirectoryName(slnFilePath) ?? throw new InvalidOperationException($"Solution directory could not be determined for path '{slnFilePath}'");
     var solution = await serializer.OpenAsync(slnFilePath, cancellationToken);
-    return [.. solution.SolutionProjects.Select(p => Path.GetDirectoryName(Path.GetFullPath(p.FilePath, slnDir)))];
+    return [.. solution.SolutionProjects.Select(p => Path.GetFullPath(p.FilePath, slnDir))];
 }
 
-static async Task PurgeProject(string dir, bool noClean, CancellationToken cancellationToken)
+static async Task PurgeProject(string projectFilePath, string targetDir, bool noClean, CancellationToken cancellationToken)
 {
-    DotnetCli.WorkingDirectory = dir;
+    var projectDir = Path.GetDirectoryName(projectFilePath) ?? throw new InvalidOperationException($"Project directory could not be determined for path '{projectFilePath}'");
 
     // Extract properties
-    var properties = await DotnetCli.GetProperties(ProjectProperties.AllOutputDirs, cancellationToken);
+    var properties = await DotnetCli.GetProperties(projectFilePath, ProjectProperties.AllOutputDirs, cancellationToken);
 
     if (!noClean)
     {
@@ -222,8 +225,11 @@ static async Task PurgeProject(string dir, bool noClean, CancellationToken cance
                 cleanArgs = [.. cleanArgs, "--framework", targetFramework];
             }
 
-            Write($"Running '{dir}{Path.DirectorySeparatorChar}dotnet clean {string.Join(' ', cleanArgs)}'...");
-            await DotnetCli.Clean(cleanArgs);
+            // Calculate relative path from target directory to project file
+            string relativePath = Path.GetRelativePath(targetDir, projectFilePath);
+            
+            Write($"Running 'dotnet clean {relativePath} {string.Join(' ', cleanArgs)}'...");
+            await DotnetCli.Clean(projectFilePath, cleanArgs);
             WriteLine(" done!", ConsoleColor.Green);
         }
     }
@@ -239,7 +245,7 @@ static async Task PurgeProject(string dir, bool noClean, CancellationToken cance
 
         var pathsToDelete = dirsToDelete
             .Where(d => !string.IsNullOrEmpty(d))
-            .Select(d => Path.GetFullPath(d, DotnetCli.WorkingDirectory))
+            .Select(d => Path.GetFullPath(d, projectDir))
             .Where(d => Directory.Exists(d))
             .OrderDescending()
             .ToList();
@@ -247,28 +253,30 @@ static async Task PurgeProject(string dir, bool noClean, CancellationToken cance
         // Delete the output directories
         foreach (var dirPath in pathsToDelete)
         {
-            if (Directory.Exists(dirPath) && !string.Equals(dir, dirPath, StringComparison.Ordinal))
+            if (Directory.Exists(dirPath) && !string.Equals(projectDir, dirPath, StringComparison.Ordinal))
             {
                 Directory.Delete(dirPath, recursive: true);
-                WriteLine($"Deleted '{dirPath}'");
+                string relativePath = Path.GetRelativePath(targetDir, dirPath);
+                WriteLine($"Deleted '{relativePath}'");
             }
         }
 
         // Check if output directories parent directories are now empty and delete them recursively
         foreach (var dirPath in pathsToDelete)
         {
-            DeleteEmptyParentDirectories(dirPath);
+            DeleteEmptyParentDirectories(dirPath, targetDir);
         }
     }
 }
 
-static void DeleteEmptyParentDirectories(string path)
+static void DeleteEmptyParentDirectories(string path, string targetDir)
 {
     var dir = new DirectoryInfo(path).Parent;
     while (dir is not null && dir.Exists && dir.GetFileSystemInfos().Length == 0)
     {
         dir.Delete();
-        WriteLine($"Deleted '{dir.FullName}'");
+        string relativePath = Path.GetRelativePath(targetDir, dir.FullName);
+        WriteLine($"Deleted '{relativePath}'");
         dir = dir.Parent;
     }
 }
@@ -351,25 +359,26 @@ static class DotnetCli
 {
     private static readonly string[] CleanArgs = ["clean"];
 
-    public static string? WorkingDirectory { get; set; }
-
-    public static Task Clean(string[] args)
+    public static Task Clean(string projectFilePath, string[] args)
     {
-        var arguments = CleanArgs.Concat(args);
+        var arguments = new List<string>(CleanArgs);
+        arguments.Add(projectFilePath);
+        arguments.AddRange(args);
+        
         var process = Start(arguments);
 
         return process.WaitForExitAsync();
     }
 
-    public static async Task<Dictionary<(string Configuration, string? TargetFramework), Dictionary<string, string>>> GetProperties(IEnumerable<string> properties, CancellationToken cancellationToken)
+    public static async Task<Dictionary<(string Configuration, string? TargetFramework), Dictionary<string, string>>> GetProperties(string projectFilePath, IEnumerable<string> properties, CancellationToken cancellationToken)
     {
         // Get configurations first
-        var configurations = (await GetProperties(null, null, [ProjectProperties.Configurations], cancellationToken))[ProjectProperties.Configurations]
+        var configurations = (await GetProperties(projectFilePath, null, null, [ProjectProperties.Configurations], cancellationToken))[ProjectProperties.Configurations]
             .Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
         // Detect multi-targeting
         string[]? targetFrameworks = null;
-        var targetFrameworksProps = (await GetProperties(null, null, [ProjectProperties.TargetFrameworks], cancellationToken));
+        var targetFrameworksProps = (await GetProperties(projectFilePath, null, null, [ProjectProperties.TargetFrameworks], cancellationToken));
         if (targetFrameworksProps.TryGetValue(ProjectProperties.TargetFrameworks, out var value) && !string.IsNullOrEmpty(value))
         {
             targetFrameworks = value.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
@@ -384,13 +393,13 @@ static class DotnetCli
             {
                 foreach (var targetFramework in targetFrameworks!)
                 {
-                    var configurationProperties = await GetProperties(configuration, targetFramework, properties, cancellationToken);
+                    var configurationProperties = await GetProperties(projectFilePath, configuration, targetFramework, properties, cancellationToken);
                     result[(configuration, targetFramework)] = configurationProperties;
                 }
             }
             else
             {
-                var configurationProperties = await GetProperties(configuration, null, properties, cancellationToken);
+                var configurationProperties = await GetProperties(projectFilePath, configuration, null, properties, cancellationToken);
                 result[(configuration, null)] = configurationProperties;
             }
         }
@@ -398,18 +407,24 @@ static class DotnetCli
         return result;
     }
 
-    public static async Task<Dictionary<string, string>> GetProperties(string? configuration, string? targetFramework, IEnumerable<string> properties, CancellationToken cancellationToken)
+    public static async Task<Dictionary<string, string>> GetProperties(string projectFilePath, string? configuration, string? targetFramework, IEnumerable<string> properties, CancellationToken cancellationToken)
     {
         var propertiesValue = string.Join(',', properties);
-        string[] arguments = ["msbuild", $"-getProperty:{propertiesValue}", "-p:BuildProjectReferences=false"];
+        var arguments = new List<string>
+        {
+            "msbuild",
+            projectFilePath,
+            $"-getProperty:{propertiesValue}",
+            "-p:BuildProjectReferences=false"
+        };
 
         if (configuration is not null)
         {
-            arguments = [.. arguments, $"-p:Configuration={configuration}"];
+            arguments.Add($"-p:Configuration={configuration}");
         }
         if (targetFramework is not null)
         {
-            arguments = [.. arguments, $"-p:TargetFramework={targetFramework}"];
+            arguments.Add($"-p:TargetFramework={targetFramework}");
         }
 
         var startInfo = GetProcessStartInfo(arguments);
@@ -444,7 +459,7 @@ static class DotnetCli
         {
             throw new InvalidOperationException(
                 $$"""
-                Error evaluating project properties at path: '{{WorkingDirectory}}'.
+                Error evaluating project properties at path: '{{projectFilePath}}'.
                 Process exited with code: {{process.ExitCode}}
                 Stdout:
                     {{stdout}}
@@ -482,11 +497,6 @@ static class DotnetCli
             UseShellExecute = false,
             CreateNoWindow = true
         };
-
-        if (WorkingDirectory is not null)
-        {
-            info.WorkingDirectory = WorkingDirectory;
-        }
 
         foreach (var arg in arguments)
         {
