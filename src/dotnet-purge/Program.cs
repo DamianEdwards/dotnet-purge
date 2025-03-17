@@ -9,9 +9,9 @@ using System.Text.Json.Serialization;
 using Microsoft.VisualStudio.SolutionPersistence.Serializer;
 using NuGet.Versioning;
 
-var targetArgument = new Argument<string?>("TARGETDIR")
+var targetArgument = new Argument<string?>("TARGET")
 {
-    Description = "The directory that contains the solution or project file to purge. If not specified, the current directory will be used.",
+    Description = "The path of the solution or project to purge. If not specified, the current directory will be used.",
     Arity = ArgumentArity.ZeroOrOne
 };
 
@@ -27,11 +27,18 @@ var noCleanOption = new Option<bool>("--no-clean", "-n")
     Arity = ArgumentArity.ZeroOrOne
 };
 
-var rootCommand = new RootCommand("Purges the solution or project in the specified directory.")
+var vsOption = new Option<bool>("--vs")
+{
+    Description = "Delete temporary files & directories created by Visual Studio, e.g. .vs, *.csproj.user.",
+    Arity = ArgumentArity.ZeroOrOne
+};
+
+var rootCommand = new RootCommand("Purges the specified solution or project.")
 {
     targetArgument,
     recurseOption,
-    noCleanOption
+    noCleanOption,
+    vsOption
 };
 rootCommand.SetAction(PurgeCommand);
 
@@ -53,19 +60,20 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     var targetValue = parseResult.GetValue(targetArgument);
     var recurseValue = parseResult.GetValue(recurseOption);
     var noCleanValue = parseResult.GetValue(noCleanOption);
+    var vsValue = parseResult.GetValue(vsOption);
 
-    var targetDir = targetValue ?? Directory.GetCurrentDirectory();
-    if (!Directory.Exists(targetDir))
+    var targetPath = targetValue ?? Directory.GetCurrentDirectory();
+    if (!Directory.Exists(targetPath) && !File.Exists(targetPath))
     {
-        parseResult.Configuration.Error.WriteLine($"Directory '{targetDir}' does not exist.");
+        parseResult.Configuration.Error.WriteLine($"'{targetPath}' does not exist.");
         return 1;
     }
-    targetDir = Path.GetFullPath(targetDir);
+    targetPath = Path.GetFullPath(targetPath);
 
-    var projectFiles = await GetProjectFiles(targetDir, recurseValue, cancellationToken);
+    var projectFiles = await GetProjectFiles(targetPath, recurseValue, cancellationToken);
     var projectCount = projectFiles.Count;
 
-    WriteLine($"Found {projectCount} projects to purge");
+    WriteLine($"Found {projectCount} {ProjectOrProjects(projectCount)} to purge");
     WriteLine();
 
     if (projectCount == 0 && !recurseValue)
@@ -87,7 +95,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
 
         try
         {
-            await PurgeProject(projectFile, targetDir, noCleanValue, cancellationToken);
+            await PurgeProject(projectFile, targetPath, noCleanValue, vsValue, cancellationToken);
             succeded++;
         }
         catch (OperationCanceledException)
@@ -106,7 +114,13 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
             continue;
         }
 
-        WriteLine($"({succeded}/{projectCount}) Purged {projectFile}");
+        var relativePath = GetRelativePath(targetPath, projectFile);
+        WriteLine($"({succeded}/{projectCount}) Purged {relativePath}");
+    }
+
+    if (vsValue)
+    {
+        DeleteVsDir(targetPath, cancellationToken);
     }
 
     var operationCancelled = cancelled > 0 || cancellationToken.IsCancellationRequested;
@@ -114,19 +128,19 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     if (succeded > 0)
     {
         WriteLine();
-        WriteLine($"Finished purging {succeded} projects", ConsoleColor.Green);
+        WriteLine($"Finished purging {succeded} {ProjectOrProjects(succeded)}", ConsoleColor.Green);
     }
 
     if (cancelled > 0)
     {
         WriteLine();
-        WriteLine($"Cancelled purging {cancelled} projects", ConsoleColor.Yellow);
+        WriteLine($"Cancelled purging {cancelled} {ProjectOrProjects(cancelled)}", ConsoleColor.Yellow);
     }
 
     if (failed > 0)
     {
         WriteLine();
-        WriteLine($"Failed purging {failed} projects", ConsoleColor.Red);
+        WriteLine($"Failed purging {failed} {ProjectOrProjects(failed)}", ConsoleColor.Red);
     }
 
     // Process the detect newer version task
@@ -155,40 +169,67 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     return failed > 0 || operationCancelled ? 1 : 0;
 }
 
+static string ProjectOrProjects(int count) => count == 1 ? "project" : "projects";
+
 async Task<HashSet<string>> GetProjectFiles(string path, bool recurse, CancellationToken cancellationToken)
 {
     var result = new HashSet<string>();
 
-    // Find all sub-directories that contain solution or project files
-    string[] projectFileMask = ["*.sln", "*.slnx", "*.csproj", "*.vbproj", "*.fsproj", "*.esproj", "*.proj"];
-
-    foreach (var fileMask in projectFileMask)
+    if (File.Exists(path))
     {
-        if (cancellationToken.IsCancellationRequested)
+        if (recurse)
         {
-            break;
+            WriteLine("The --recurse option is ignored when specifying a single project or solution file.", ConsoleColor.DarkBlue);
         }
 
-        var searchOption = recurse ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-        var files = new DirectoryInfo(path).EnumerateFiles(fileMask, searchOption);
-        foreach (var file in files)
+        var extension = Path.GetExtension(path);
+
+        if (extension == ".sln" || extension == ".slnx")
+        {
+            var projectFiles = await GetSlnProjectFiles(path, cancellationToken);
+            foreach (var projectFile in projectFiles)
+            {
+                result.Add(projectFile);
+            }
+        }
+        else if (extension == ".csproj" || extension == ".vbproj" || extension == ".fsproj" || extension == ".esproj" || extension == ".proj")
+        {
+            result.Add(path);
+        }
+    }
+    else
+    {
+        // Find all sub-directories that contain solution or project files
+        string[] projectFileMask = ["*.sln", "*.slnx", "*.csproj", "*.vbproj", "*.fsproj", "*.esproj", "*.proj"];
+
+        foreach (var fileMask in projectFileMask)
         {
             if (cancellationToken.IsCancellationRequested)
             {
                 break;
             }
 
-            if (file.Extension == ".sln" || file.Extension == ".slnx")
+            var searchOption = recurse ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+            var files = new DirectoryInfo(path).EnumerateFiles(fileMask, searchOption);
+            foreach (var file in files)
             {
-                var projectFiles = await GetSlnProjectFiles(file.FullName, cancellationToken);
-                foreach (var projectFile in projectFiles)
+                if (cancellationToken.IsCancellationRequested)
                 {
-                    result.Add(projectFile);
+                    break;
                 }
-            }
-            else
-            {
-                result.Add(file.FullName);
+
+                if (file.Extension == ".sln" || file.Extension == ".slnx")
+                {
+                    var projectFiles = await GetSlnProjectFiles(file.FullName, cancellationToken);
+                    foreach (var projectFile in projectFiles)
+                    {
+                        result.Add(projectFile);
+                    }
+                }
+                else
+                {
+                    result.Add(file.FullName);
+                }
             }
         }
     }
@@ -205,7 +246,7 @@ static async Task<List<string>> GetSlnProjectFiles(string slnFilePath, Cancellat
     return [.. solution.SolutionProjects.Select(p => Path.GetFullPath(p.FilePath, slnDir))];
 }
 
-static async Task PurgeProject(string projectFilePath, string targetDir, bool noClean, CancellationToken cancellationToken)
+static async Task PurgeProject(string projectFilePath, string targetPath, bool noClean, bool deleteVsFiles, CancellationToken cancellationToken)
 {
     var projectDir = Path.GetDirectoryName(projectFilePath) ?? throw new InvalidOperationException($"Project directory could not be determined for path '{projectFilePath}'");
 
@@ -226,7 +267,7 @@ static async Task PurgeProject(string projectFilePath, string targetDir, bool no
             }
 
             // Calculate relative path from target directory to project file
-            string relativePath = Path.GetRelativePath(targetDir, projectFilePath);
+            var relativePath = GetRelativePath(targetPath, projectFilePath);
             
             Write($"Running 'dotnet clean {relativePath} {string.Join(' ', cleanArgs)}'...");
             await DotnetCli.Clean(projectFilePath, cleanArgs);
@@ -256,7 +297,7 @@ static async Task PurgeProject(string projectFilePath, string targetDir, bool no
             if (Directory.Exists(dirPath) && !string.Equals(projectDir, dirPath, StringComparison.Ordinal))
             {
                 Directory.Delete(dirPath, recursive: true);
-                string relativePath = Path.GetRelativePath(targetDir, dirPath);
+                var relativePath = GetRelativePath(targetPath, dirPath);
                 WriteLine($"Deleted '{relativePath}'");
             }
         }
@@ -264,21 +305,92 @@ static async Task PurgeProject(string projectFilePath, string targetDir, bool no
         // Check if output directories parent directories are now empty and delete them recursively
         foreach (var dirPath in pathsToDelete)
         {
-            DeleteEmptyParentDirectories(dirPath, targetDir);
+            DeleteEmptyParentDirectories(dirPath, targetPath);
+        }
+    }
+
+    if (deleteVsFiles)
+    {
+        // Delete Visual Studio related directories & files for this project
+        List<string> vsPaths = [
+            Path.Combine(projectDir, ".vs"),
+            $"{projectFilePath}.user"
+        ];
+
+        foreach (var path in vsPaths)
+        {
+            var deleted = false;
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+                deleted = true;
+            }
+            else if (File.Exists(path))
+            {
+                File.Delete(path);
+                deleted = true;
+            }
+
+            if (deleted)
+            {
+                var relativePath = GetRelativePath(targetPath, path);
+                WriteLine($"Deleted '{relativePath}'");
+            }
         }
     }
 }
 
-static void DeleteEmptyParentDirectories(string path, string targetDir)
+static void DeleteVsDir(string targetPath, CancellationToken cancellationToken)
+{
+    // Find the .vs directory by walking up the directory tree from the target directory until it's found
+    // or a .git directory is found, and if found delete the .vs directory
+    var dir = new DirectoryInfo(Path.GetDirectoryName(targetPath) ?? targetPath);
+    while (dir is not null && dir.Exists)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            break;
+        }
+
+        var vsDir = new DirectoryInfo(Path.Combine(dir.FullName, ".vs"));
+        if (vsDir.Exists)
+        {
+            vsDir.Delete(recursive: true);
+            var relativePath = GetRelativePath(targetPath, vsDir.FullName);
+            WriteLine($"Deleted '{relativePath}'");
+            break;
+        }
+
+        if (dir.GetDirectories(".git").Length > 0)
+        {
+            break;
+        }
+
+        dir = dir.Parent;
+    }
+}
+
+static void DeleteEmptyParentDirectories(string path, string targetPath)
 {
     var dir = new DirectoryInfo(path).Parent;
     while (dir is not null && dir.Exists && dir.GetFileSystemInfos().Length == 0)
     {
         dir.Delete();
-        string relativePath = Path.GetRelativePath(targetDir, dir.FullName);
+        string relativePath = GetRelativePath(targetPath, dir.FullName);
         WriteLine($"Deleted '{relativePath}'");
         dir = dir.Parent;
     }
+}
+
+static string GetRelativePath(string relativeTo, string path)
+{
+    if (File.Exists(path))
+    {
+        // It's a file so get the directory
+        path = Path.GetDirectoryName(path) ?? path;
+    }
+
+    return Path.GetRelativePath(relativeTo, path);
 }
 
 static async Task<string?> DetectNewerVersion(CancellationToken cancellationToken)
