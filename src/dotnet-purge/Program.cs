@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.VisualStudio.SolutionPersistence.Serializer;
 using NuGet.Versioning;
+using Spectre.Console;
 
 var targetArgument = new Argument<string?>("TARGET")
 {
@@ -65,82 +66,110 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     var targetPath = targetValue ?? Directory.GetCurrentDirectory();
     if (!Directory.Exists(targetPath) && !File.Exists(targetPath))
     {
-        parseResult.Configuration.Error.WriteLine($"'{targetPath}' does not exist.");
+        AnsiConsole.MarkupLineInterpolated($"[red]'{targetPath}' does not exist.[/]");
         return 1;
-    }
-    targetPath = Path.GetFullPath(targetPath);
-
-    var projectFiles = await GetProjectFiles(targetPath, recurseValue, cancellationToken);
-    var projectCount = projectFiles.Count;
-
-    WriteLine($"Found {projectCount} {ProjectOrProjects(projectCount)} to purge");
-    WriteLine();
-
-    if (projectCount == 0 && !recurseValue)
-    {
-        WriteLine("Use --recurse to search for projects in sub-directories.", ConsoleColor.DarkBlue);
     }
 
     var succeded = 0;
     var failed = 0;
     var cancelled = 0;
-    foreach (var projectFile in projectFiles)
-    {
-        if (cancellationToken.IsCancellationRequested)
-        {
-            var remaining = projectCount - succeded - failed - cancelled;
-            cancelled += remaining;
-            break;
-        }
 
-        try
+    await AnsiConsole.Status()
+        .Spinner(Spinner.Known.Dots)
+        .SpinnerStyle(Style.Parse("aqua"))
+        .StartAsync("Finding projects...", async ctx =>
         {
-            await PurgeProject(projectFile, targetPath, noCleanValue, vsValue, cancellationToken);
-            succeded++;
-        }
-        catch (OperationCanceledException)
-        {
-            cancelled++;
-            break;
-        }
-        catch (Exception ex)
-        {
-            WriteError(
-                $$"""
-                Failed to purge project at path: {{projectFile}}
-                {{ex.Message}}
-                """);
-            failed++;
-            continue;
-        }
+            targetPath = Path.GetFullPath(targetPath);
 
-        var relativePath = GetRelativePath(targetPath, projectFile);
-        WriteLine($"({succeded}/{projectCount}) Purged {relativePath}");
-    }
+            var projectFiles = await GetProjectFiles(targetPath, recurseValue, cancellationToken);
+            var projectCount = projectFiles.Count;
 
-    if (vsValue)
-    {
-        DeleteVsDir(targetPath, cancellationToken);
-    }
+            AnsiConsole.MarkupInterpolated($"Found {projectCount} {ProjectOrProjects(projectCount)} to purge");
+            AnsiConsole.WriteLine();
+            //WriteLine();
+            //WriteLine();
+
+            if (projectCount == 0 && !recurseValue)
+            {
+                AnsiConsole.MarkupLine("[aqua]Use --recurse to search for projects in sub-directories.[/]");
+                //WriteLine("Use --recurse to search for projects in sub-directories.", ConsoleColor.DarkBlue);
+            }
+
+            ctx.Spinner(Spinner.Known.BouncingBar);
+            ctx.SpinnerStyle(Style.Parse("lime"));
+            ctx.Status("Purging projects...");
+
+            foreach (var projectFile in projectFiles)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    var remaining = projectCount - succeded - failed - cancelled;
+                    cancelled += remaining;
+                    break;
+                }
+
+                try
+                {
+                    await PurgeProject(projectFile, targetPath, noCleanValue, vsValue, cancellationToken);
+                    succeded++;
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled++;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    AnsiConsole.MarkupLineInterpolated(
+                        $$"""
+                        Failed to purge project at path: {{new TextPath(projectFile)}}
+                        {{ex.Message}}
+                        """);
+                    // WriteError(
+                    //     $$"""
+                    //     Failed to purge project at path: {{projectFile}}
+                    //     {{ex.Message}}
+                    //     """);
+                    failed++;
+                    continue;
+                }
+
+                var relativePath = GetRelativePath(targetPath, projectFile);
+                AnsiConsole.MarkupLine($"({succeded}/{projectCount}) Purged [italic]{relativePath}[/]");
+                //WriteLine($"({succeded}/{projectCount}) Purged {relativePath}");
+            }
+
+            if (vsValue)
+            {
+                ctx.Status("Deleting VS directories...");
+                DeleteVsDir(targetPath, cancellationToken);
+            }
+        });
 
     var operationCancelled = cancelled > 0 || cancellationToken.IsCancellationRequested;
 
     if (succeded > 0)
     {
-        WriteLine();
-        WriteLine($"Finished purging {succeded} {ProjectOrProjects(succeded)}", ConsoleColor.Green);
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLineInterpolated($"[lime]Finished purging {succeded} {ProjectOrProjects(succeded)}.[/]");
+        //WriteLine();
+        //WriteLine($"Finished purging {succeded} {ProjectOrProjects(succeded)}", ConsoleColor.Green);
     }
 
     if (cancelled > 0)
     {
-        WriteLine();
-        WriteLine($"Cancelled purging {cancelled} {ProjectOrProjects(cancelled)}", ConsoleColor.Yellow);
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLineInterpolated($"[yellow]Cancelled purging {cancelled} {ProjectOrProjects(cancelled)}.[/]");
+        //WriteLine();
+        //WriteLine($"Cancelled purging {cancelled} {ProjectOrProjects(cancelled)}", ConsoleColor.Yellow);
     }
 
     if (failed > 0)
     {
-        WriteLine();
-        WriteLine($"Failed purging {failed} {ProjectOrProjects(failed)}", ConsoleColor.Red);
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLineInterpolated($"[red]Failed purging {failed} {ProjectOrProjects(failed)}.[/]");
+        //WriteLine();
+        //WriteLine($"Failed purging {failed} {ProjectOrProjects(failed)}", ConsoleColor.Red);
     }
 
     // Process the detect newer version task
@@ -150,9 +179,12 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
         if (newerVersion is not null)
         {
             // TODO: Handle case when newer version is a pre-release version
-            WriteLine();
-            WriteLine($"A newer version ({newerVersion}) of dotnet-purge is available!", ConsoleColor.Yellow);
-            WriteLine("Update by running 'dotnet tool update -g dotnet-purge'", ConsoleColor.Green);
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLineInterpolated($"[yellow]A newer version ({newerVersion}) of dotnet-purge is available![/]");
+            AnsiConsole.MarkupLine("[lime]Update by running 'dotnet tool update -g dotnet-purge'[/]");
+            // WriteLine();
+            // WriteLine($"A newer version ({newerVersion}) of dotnet-purge is available!", ConsoleColor.Yellow);
+            // WriteLine("Update by running 'dotnet tool update -g dotnet-purge'", ConsoleColor.Green);
         }
     }
     catch (Exception)
@@ -162,8 +194,10 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
 
     if (operationCancelled)
     {
-        WriteLine();
-        WriteLine("Operation cancelled", ConsoleColor.Yellow);
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[yellow]Operation cancelled[/]");
+        // WriteLine();
+        // WriteLine("Operation cancelled", ConsoleColor.Yellow);
     }
 
     return failed > 0 || operationCancelled ? 1 : 0;
@@ -179,7 +213,8 @@ async Task<HashSet<string>> GetProjectFiles(string path, bool recurse, Cancellat
     {
         if (recurse)
         {
-            WriteLine("The --recurse option is ignored when specifying a single project or solution file.", ConsoleColor.DarkBlue);
+            AnsiConsole.MarkupLine("[aqua]The --recurse option is ignored when specifying a single project or solution file.[/]");
+            //WriteLine("The --recurse option is ignored when specifying a single project or solution file.", ConsoleColor.DarkBlue);
         }
 
         var extension = Path.GetExtension(path);
@@ -269,9 +304,14 @@ static async Task PurgeProject(string projectFilePath, string targetPath, bool n
             // Calculate relative path from target directory to project file
             var relativePath = GetRelativePath(targetPath, projectFilePath);
             
-            Write($"Running 'dotnet clean {relativePath} {string.Join(' ', cleanArgs)}'...");
+            var frameworkSuffix = targetFramework is not null ? $", {targetFramework}" : "";
+            AnsiConsole.MarkupLineInterpolated($"Cleaning [italic]{relativePath}[/] ({configuration}{frameworkSuffix}) ...");
+            //Write($"Running 'dotnet clean {relativePath} {string.Join(' ', cleanArgs)}'...");
+
             await DotnetCli.Clean(projectFilePath, cleanArgs);
-            WriteLine(" done!", ConsoleColor.Green);
+
+            //AnsiConsole.MarkupLine(" [bold lime]done![/]");
+            //WriteLine(" done!", ConsoleColor.Green);
         }
     }
 
@@ -298,7 +338,8 @@ static async Task PurgeProject(string projectFilePath, string targetPath, bool n
             {
                 Directory.Delete(dirPath, recursive: true);
                 var relativePath = GetRelativePath(targetPath, dirPath);
-                WriteLine($"Deleted '{relativePath}'");
+                AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
+                //WriteLine($"Deleted '{relativePath}'");
             }
         }
 
@@ -334,7 +375,8 @@ static async Task PurgeProject(string projectFilePath, string targetPath, bool n
             if (deleted)
             {
                 var relativePath = GetRelativePath(targetPath, path);
-                WriteLine($"Deleted '{relativePath}'");
+                AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
+                //WriteLine($"Deleted '{relativePath}'");
             }
         }
     }
@@ -357,7 +399,8 @@ static void DeleteVsDir(string targetPath, CancellationToken cancellationToken)
         {
             vsDir.Delete(recursive: true);
             var relativePath = GetRelativePath(targetPath, vsDir.FullName);
-            WriteLine($"Deleted '{relativePath}'");
+            AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
+            //WriteLine($"Deleted '{relativePath}'");
             break;
         }
 
@@ -376,8 +419,9 @@ static void DeleteEmptyParentDirectories(string path, string targetPath)
     while (dir is not null && dir.Exists && dir.GetFileSystemInfos().Length == 0)
     {
         dir.Delete();
-        string relativePath = GetRelativePath(targetPath, dir.FullName);
-        WriteLine($"Deleted '{relativePath}'");
+        var relativePath = GetRelativePath(targetPath, dir.FullName);
+        AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
+        //WriteLine($"Deleted '{relativePath}'");
         dir = dir.Parent;
     }
 }
@@ -426,32 +470,6 @@ static async Task<string?> DetectNewerVersion(CancellationToken cancellationToke
     }
 
     return latestVersion > currentVersion ? latestVersion.ToString() : null;
-}
-
-static void WriteError(string message) => WriteLine(message, ConsoleColor.Red);
-
-static void WriteLine(string? message = null, ConsoleColor? color = default)
-{
-    if (!string.IsNullOrEmpty(message))
-    {
-        Write(message, color);
-    }
-    Console.WriteLine();
-}
-
-static void Write(string? message = null, ConsoleColor? color = default)
-{
-    if (color is not null)
-    {
-        var originalColor = Console.ForegroundColor;
-        Console.ForegroundColor = color.Value;
-        Console.Write(message);
-        Console.ForegroundColor = originalColor;
-    }
-    else
-    {
-        Console.Write(message);
-    }
 }
 
 static class ProjectProperties
