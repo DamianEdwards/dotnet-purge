@@ -1,4 +1,5 @@
-﻿using System.CommandLine;
+﻿using System.Collections.Concurrent;
+using System.CommandLine;
 using System.CommandLine.Invocation;
 using System.Diagnostics;
 using System.Net.Http.Json;
@@ -70,7 +71,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
         return 1;
     }
 
-    var succeded = 0;
+    var succeeded = 0;
     var failed = 0;
     var cancelled = 0;
 
@@ -86,59 +87,199 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
 
             AnsiConsole.MarkupInterpolated($"Found {projectCount} {ProjectOrProjects(projectCount)} to purge");
             AnsiConsole.WriteLine();
-            //WriteLine();
-            //WriteLine();
 
             if (projectCount == 0 && !recurseValue)
             {
                 AnsiConsole.MarkupLine("[aqua]Use --recurse to search for projects in sub-directories.[/]");
-                //WriteLine("Use --recurse to search for projects in sub-directories.", ConsoleColor.DarkBlue);
             }
 
             ctx.Spinner(Spinner.Known.BouncingBar);
             ctx.SpinnerStyle(Style.Parse("lime"));
-            ctx.Status("Purging projects...");
+            ctx.Status("Detecting project configurations...");
 
-            foreach (var projectFile in projectFiles)
+            ConcurrentDictionary<string, Dictionary<(string Configuration, string? TargetFramework), Dictionary<string, string>>> projectProperties = new();
+            ConcurrentQueue<string> failedQueue = new();
+
+            await Parallel.ForEachAsync(projectFiles, new ParallelOptions { CancellationToken = cancellationToken }, async (projectFile, ct) =>
             {
-                if (cancellationToken.IsCancellationRequested)
+                if (ct.IsCancellationRequested)
                 {
-                    var remaining = projectCount - succeded - failed - cancelled;
-                    cancelled += remaining;
-                    break;
+                    return;
                 }
 
+                // Get the project output directories
                 try
                 {
-                    await PurgeProject(projectFile, targetPath, noCleanValue, vsValue, cancellationToken);
-                    succeded++;
+                    var properties = await DotnetCli.GetProperties(projectFile, ProjectProperties.AllOutputDirs, ct);
+                    projectProperties.AddOrUpdate(projectFile, properties, (_, _) => properties);
                 }
                 catch (OperationCanceledException)
                 {
                     cancelled++;
-                    break;
                 }
                 catch (Exception ex)
                 {
+                    var relativePath = GetRelativePath(targetPath, projectFile);
                     AnsiConsole.MarkupLineInterpolated(
                         $$"""
-                        Failed to purge project at path: {{new TextPath(projectFile)}}
-                        {{ex.Message}}
+                        [red]Failed to detect project configurations at path: {{relativePath}}
+                        {{ex.Message}}[/]
                         """);
-                    // WriteError(
-                    //     $$"""
-                    //     Failed to purge project at path: {{projectFile}}
-                    //     {{ex.Message}}
-                    //     """);
                     failed++;
-                    continue;
+                    failedQueue.Enqueue(projectFile);
                 }
+            });
 
-                var relativePath = GetRelativePath(targetPath, projectFile);
-                AnsiConsole.MarkupLine($"({succeded}/{projectCount}) Purged [italic]{relativePath}[/]");
-                //WriteLine($"({succeded}/{projectCount}) Purged {relativePath}");
+            // Handle cancellation
+            if (cancellationToken.IsCancellationRequested)
+            {
+                cancelled = projectFiles.Count;
+                return;
             }
 
+            // Handle failed projects
+            foreach (var projectFile in failedQueue)
+            {
+                projectProperties.Remove(projectFile, out _);
+            }
+            failedQueue.Clear();
+
+            if (!noCleanValue)
+            {
+                ctx.Status("Cleaning projects...");
+
+                // Run `dotnet clean` for each configuration
+                await Parallel.ForEachAsync(projectProperties, new ParallelOptions { CancellationToken = cancellationToken }, async (kvp, ct) =>
+                {
+                    if (ct.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    var projectFilePath = kvp.Key;
+                    var projectConfig = kvp.Value.ToDictionary(k => k, v => v);
+
+                    // Run `dotnet clean` for each configuration
+                    await Parallel.ForEachAsync(projectConfig.Keys, new ParallelOptions { CancellationToken = ct }, async (config, ct) =>
+                    {
+                        if (ct.IsCancellationRequested)
+                        {
+                            return;
+                        }
+
+                        var (configuration, targetFramework) = config.Key;
+
+                        string[] cleanArgs = ["--configuration", configuration, "-p:BuildProjectReferences=false"];
+                        if (targetFramework is not null)
+                        {
+                            cleanArgs = [.. cleanArgs, "--framework", targetFramework];
+                        }
+
+                        // Calculate relative path from target directory to project file
+                        var relativePath = GetRelativePath(targetPath, projectFilePath);
+                        
+                        var frameworkSuffix = targetFramework is not null ? $", {targetFramework}" : "";
+                        AnsiConsole.MarkupLineInterpolated($"Cleaning [italic]{relativePath}[/] ({configuration}{frameworkSuffix}) ...");
+
+                        try
+                        {
+                            await DotnetCli.Clean(projectFilePath, cleanArgs);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            cancelled++;
+                        }
+                        catch (Exception ex)
+                        {
+                            AnsiConsole.MarkupLineInterpolated(
+                                $$"""
+                                [red]Failed to clean project at path: {{relativePath}}
+                                > {{ex.Message}}[/]
+                                """);
+                            failed++;
+                            failedQueue.Enqueue(projectFilePath);
+                        }
+                    });
+                });
+
+                // Handle cancellation
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    cancelled = projectFiles.Count;
+                    return;
+                }
+
+                // Handle failed projects
+                foreach (var projectFile in failedQueue)
+                {
+                    projectProperties.Remove(projectFile, out _);
+                }
+                failedQueue.Clear();
+            }
+
+            ctx.Status("Deleting output directories...");
+
+            // Delete the output directories for each configuration
+            var allOutputDirs = projectProperties.Values // (config, targetFramework), propertyName, directory
+                .SelectMany(d => d.Values) // propertyName, directory
+                .SelectMany(d => d.Values) // directory
+                .OrderDescending()
+                .Distinct()
+                .ToList();
+
+            // Delete the output directories
+            Parallel.ForEach(allOutputDirs, (dirPath, state) =>
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    state.Stop();
+                    return;
+                }
+
+                if (Directory.Exists(dirPath))
+                {
+                    var relativePath = GetRelativePath(targetPath, dirPath);
+                    try
+                    {
+                        Directory.Delete(dirPath, recursive: true);
+                        AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
+                    }
+                    catch (Exception ex)
+                    {
+                        AnsiConsole.MarkupLineInterpolated(
+                            $$"""
+                            [red]Failed to delete output directory at path: {{relativePath}}
+                            > {{ex.Message}}[/]
+                            """);
+                        
+                        failed++;
+                        failedQueue.Enqueue(dirPath);
+                    }
+                }
+            });
+
+            // Handle cancellation
+            if (cancellationToken.IsCancellationRequested)
+            {
+                //cancelled = projectFiles.Count;
+                return;
+            }
+
+            // Handle failed projects
+            foreach (var projectFile in failedQueue)
+            {
+                projectProperties.Remove(projectFile, out _);
+            }
+            failedQueue.Clear();
+
+            // Check if output directories parent directories are now empty and delete them recursively
+            foreach (var dirPath in allOutputDirs)
+            {
+                DeleteEmptyParentDirectories(dirPath, targetPath);
+            }
+
+            // TODO: Delete VS directories for each project
+        
             if (vsValue)
             {
                 ctx.Status("Deleting VS directories...");
@@ -146,30 +287,25 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
             }
         });
 
+    // TODO: Rethink and update how to report the results
     var operationCancelled = cancelled > 0 || cancellationToken.IsCancellationRequested;
 
-    if (succeded > 0)
+    if (succeeded > 0)
     {
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLineInterpolated($"[lime]Finished purging {succeded} {ProjectOrProjects(succeded)}.[/]");
-        //WriteLine();
-        //WriteLine($"Finished purging {succeded} {ProjectOrProjects(succeded)}", ConsoleColor.Green);
+        AnsiConsole.MarkupLineInterpolated($"[lime]Finished purging {succeeded} {ProjectOrProjects(succeeded)}.[/]");
     }
 
     if (cancelled > 0)
     {
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLineInterpolated($"[yellow]Cancelled purging {cancelled} {ProjectOrProjects(cancelled)}.[/]");
-        //WriteLine();
-        //WriteLine($"Cancelled purging {cancelled} {ProjectOrProjects(cancelled)}", ConsoleColor.Yellow);
     }
 
     if (failed > 0)
     {
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLineInterpolated($"[red]Failed purging {failed} {ProjectOrProjects(failed)}.[/]");
-        //WriteLine();
-        //WriteLine($"Failed purging {failed} {ProjectOrProjects(failed)}", ConsoleColor.Red);
     }
 
     // Process the detect newer version task
@@ -182,9 +318,6 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
             AnsiConsole.WriteLine();
             AnsiConsole.MarkupLineInterpolated($"[yellow]A newer version ({newerVersion}) of dotnet-purge is available![/]");
             AnsiConsole.MarkupLine("[lime]Update by running 'dotnet tool update -g dotnet-purge'[/]");
-            // WriteLine();
-            // WriteLine($"A newer version ({newerVersion}) of dotnet-purge is available!", ConsoleColor.Yellow);
-            // WriteLine("Update by running 'dotnet tool update -g dotnet-purge'", ConsoleColor.Green);
         }
     }
     catch (Exception)
@@ -196,8 +329,6 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     {
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("[yellow]Operation cancelled[/]");
-        // WriteLine();
-        // WriteLine("Operation cancelled", ConsoleColor.Yellow);
     }
 
     return failed > 0 || operationCancelled ? 1 : 0;
@@ -214,7 +345,6 @@ async Task<HashSet<string>> GetProjectFiles(string path, bool recurse, Cancellat
         if (recurse)
         {
             AnsiConsole.MarkupLine("[aqua]The --recurse option is ignored when specifying a single project or solution file.[/]");
-            //WriteLine("The --recurse option is ignored when specifying a single project or solution file.", ConsoleColor.DarkBlue);
         }
 
         var extension = Path.GetExtension(path);
@@ -376,7 +506,6 @@ static async Task PurgeProject(string projectFilePath, string targetPath, bool n
             {
                 var relativePath = GetRelativePath(targetPath, path);
                 AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
-                //WriteLine($"Deleted '{relativePath}'");
             }
         }
     }
@@ -421,7 +550,6 @@ static void DeleteEmptyParentDirectories(string path, string targetPath)
         dir.Delete();
         var relativePath = GetRelativePath(targetPath, dir.FullName);
         AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
-        //WriteLine($"Deleted '{relativePath}'");
         dir = dir.Parent;
     }
 }
