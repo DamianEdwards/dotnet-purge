@@ -133,6 +133,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
             // Handle cancellation
             if (cancellationToken.IsCancellationRequested)
             {
+                // We haven't deleted anything yet so set cancelled count to count of all project files
                 cancelled = projectFiles.Count;
                 return;
             }
@@ -272,18 +273,55 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
             }
             failedQueue.Clear();
 
+            // Delete VS directories for each project
+            if (vsValue)
+            {
+                ctx.Status("Deleting VS directories...");
+
+                var vsPaths = projectProperties.Keys // Project file path
+                    .SelectMany(p =>
+                    {
+                        var projectDir = Path.GetDirectoryName(p) ?? throw new InvalidOperationException($"Project directory could not be determined for path '{p}'");
+                        return new List<string> {
+                            Path.Combine(projectDir, ".vs"),
+                            $"{p}.user"
+                        };
+                    })
+                    .OrderDescending()
+                    .Distinct()
+                    .ToList();
+
+                if (vsPaths.Count > 0)
+                {
+                    Parallel.ForEach(vsPaths, (path, state) =>
+                    {
+                        var deleted = false;
+                        if (Directory.Exists(path))
+                        {
+                            Directory.Delete(path, recursive: true);
+                            deleted = true;
+                        }
+                        else if (File.Exists(path))
+                        {
+                            File.Delete(path);
+                            deleted = true;
+                        }
+                        if (deleted)
+                        {
+                            var relativePath = GetRelativePath(targetPath, path);
+                            AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
+                        }
+                    });
+                }
+
+                // Delete the .vs dir at the sln or repo root
+                DeleteVsDir(targetPath, cancellationToken);
+            }
+
             // Check if output directories parent directories are now empty and delete them recursively
             foreach (var dirPath in allOutputDirs)
             {
                 DeleteEmptyParentDirectories(dirPath, targetPath);
-            }
-
-            // TODO: Delete VS directories for each project
-        
-            if (vsValue)
-            {
-                ctx.Status("Deleting VS directories...");
-                DeleteVsDir(targetPath, cancellationToken);
             }
         });
 
@@ -349,7 +387,7 @@ async Task<HashSet<string>> GetProjectFiles(string path, bool recurse, Cancellat
 
         var extension = Path.GetExtension(path);
 
-        if (extension == ".sln" || extension == ".slnx")
+        if (extension is ".sln" or ".slnx")
         {
             var projectFiles = await GetSlnProjectFiles(path, cancellationToken);
             foreach (var projectFile in projectFiles)
@@ -357,7 +395,7 @@ async Task<HashSet<string>> GetProjectFiles(string path, bool recurse, Cancellat
                 result.Add(projectFile);
             }
         }
-        else if (extension == ".csproj" || extension == ".vbproj" || extension == ".fsproj" || extension == ".esproj" || extension == ".proj")
+        else if (extension is ".csproj" or ".vbproj" or ".fsproj" or ".esproj" or ".proj")
         {
             result.Add(path);
         }
@@ -383,7 +421,7 @@ async Task<HashSet<string>> GetProjectFiles(string path, bool recurse, Cancellat
                     break;
                 }
 
-                if (file.Extension == ".sln" || file.Extension == ".slnx")
+                if (file.Extension is ".sln" or ".slnx")
                 {
                     var projectFiles = await GetSlnProjectFiles(file.FullName, cancellationToken);
                     foreach (var projectFile in projectFiles)
@@ -619,9 +657,7 @@ static class DotnetCli
 
     public static Task Clean(string projectFilePath, string[] args)
     {
-        var arguments = new List<string>(CleanArgs);
-        arguments.Add(projectFilePath);
-        arguments.AddRange(args);
+        List<string> arguments = [.. CleanArgs, projectFilePath, .. args];
         
         var process = Start(arguments);
 
@@ -668,13 +704,7 @@ static class DotnetCli
     public static async Task<Dictionary<string, string>> GetProperties(string projectFilePath, string? configuration, string? targetFramework, IEnumerable<string> properties, CancellationToken cancellationToken)
     {
         var propertiesValue = string.Join(',', properties);
-        var arguments = new List<string>
-        {
-            "msbuild",
-            projectFilePath,
-            $"-getProperty:{propertiesValue}",
-            "-p:BuildProjectReferences=false"
-        };
+        List<string> arguments = ["msbuild", projectFilePath, $"-getProperty:{propertiesValue}", "-p:BuildProjectReferences=false"];
 
         if (configuration is not null)
         {
