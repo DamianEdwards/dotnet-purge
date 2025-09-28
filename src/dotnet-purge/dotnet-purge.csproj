@@ -9,7 +9,7 @@
     <Nullable>enable</Nullable>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>dotnet-purge</ToolCommandName>
-    <VersionPrefix>0.0.12</VersionPrefix>
+    <VersionPrefix>0.0.13</VersionPrefix>
     <VersionSuffix Condition=" '$(Configuration)' == 'Debug' ">dev</VersionSuffix>
     <Authors>Damian Edwards</Authors>
     <Copyright>Copyright © Damian Edwards</Copyright>
@@ -27,7 +27,7 @@
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <PackageReference Include="Microsoft.VisualStudio.SolutionPersistence" Version="1.0.52" />
-    <PackageReference Include="System.CommandLine" Version="2.0.0-*" />
+    <PackageReference Include="System.CommandLine" Version="2.0.0-rc.1.25451.107" />
     <PackageReference Include="Spectre.Console" Version="0.50.0" />
     <PackageReference Include="NuGet.Versioning" Version="6.13.2" />
   </ItemGroup>

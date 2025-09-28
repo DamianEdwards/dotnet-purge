@@ -788,7 +788,7 @@ internal sealed class VersionOptionAction : SynchronousCommandLineAction
     public override int Invoke(ParseResult parseResult)
     {
         var currentVersion = GetCurrentVersion();
-        parseResult.Configuration.Output.WriteLine(currentVersion ?? "<unknown>");
+        parseResult.InvocationConfiguration.Output.WriteLine(currentVersion ?? "<unknown>");
 
         return 0;
     }
