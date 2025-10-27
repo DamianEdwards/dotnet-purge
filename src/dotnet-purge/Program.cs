@@ -119,11 +119,11 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
                 }
                 catch (Exception ex)
                 {
-                    var relativePath = GetRelativePath(targetPath, projectFile);
+                    var relativePath = GetRelativePath(Directory.GetCurrentDirectory(), projectFile);
                     AnsiConsole.MarkupLineInterpolated(
                         $$"""
-                        [red]Failed to detect project configurations at path: {{relativePath}}
-                        {{ex.Message}}[/]
+                        [red]❌ Failed to detect project configurations at path: {{relativePath}}
+                        > {{ex.Message}}[/]
                         """);
                     failed++;
                     failedQueue.Enqueue(projectFile);
@@ -177,10 +177,10 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
                         }
 
                         // Calculate relative path from target directory to project file
-                        var relativePath = GetRelativePath(targetPath, projectFilePath);
+                        var relativePath = GetRelativePath(Directory.GetCurrentDirectory(), projectFilePath);
                         
                         var frameworkSuffix = targetFramework is not null ? $", {targetFramework}" : "";
-                        AnsiConsole.MarkupLineInterpolated($"Cleaning [italic]{relativePath}[/] ({configuration}{frameworkSuffix}) ...");
+                        AnsiConsole.MarkupLineInterpolated($"🧹 Cleaning [italic]{relativePath}[/] ({configuration}{frameworkSuffix}) ...");
 
                         try
                         {
@@ -194,7 +194,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
                         {
                             AnsiConsole.MarkupLineInterpolated(
                                 $$"""
-                                [red]Failed to clean project at path: {{relativePath}}
+                                [red]❌ Failed to clean project at path: {{relativePath}}
                                 > {{ex.Message}}[/]
                                 """);
                             failed++;
@@ -239,17 +239,17 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
 
                 if (Directory.Exists(dirPath))
                 {
-                    var relativePath = GetRelativePath(targetPath, dirPath);
+                    var relativePath = GetRelativePath(Directory.GetCurrentDirectory(), dirPath);
                     try
                     {
                         Directory.Delete(dirPath, recursive: true);
-                        AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
+                        AnsiConsole.MarkupLineInterpolated($"[green]✅ Deleted [italic] {relativePath} [/][/]");
                     }
                     catch (Exception ex)
                     {
                         AnsiConsole.MarkupLineInterpolated(
                             $$"""
-                            [red]Failed to delete output directory at path: {{relativePath}}
+                            [red]❌ Failed to delete output directory at path: {{relativePath}}
                             > {{ex.Message}}[/]
                             """);
                         
@@ -276,7 +276,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
             // Delete VS directories for each project
             if (vsValue)
             {
-                ctx.Status("Deleting VS directories...");
+                ctx.Status("🧹 Deleting VS directories...");
 
                 var vsPaths = projectProperties.Keys // Project file path
                     .SelectMany(p =>
@@ -308,8 +308,8 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
                         }
                         if (deleted)
                         {
-                            var relativePath = GetRelativePath(targetPath, path);
-                            AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
+                            var relativePath = GetRelativePath(Directory.GetCurrentDirectory(), path);
+                            AnsiConsole.MarkupLineInterpolated($"[green]✅ Deleted [italic]{relativePath}[/][/]");
                         }
                     });
                 }
@@ -366,7 +366,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
     if (operationCancelled)
     {
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine("[yellow]Operation cancelled[/]");
+        AnsiConsole.MarkupLine("[yellow]🛑 Operation cancelled[/]");
     }
 
     return failed > 0 || operationCancelled ? 1 : 0;
@@ -449,106 +449,6 @@ static async Task<List<string>> GetSlnProjectFiles(string slnFilePath, Cancellat
     return [.. solution.SolutionProjects.Select(p => Path.GetFullPath(p.FilePath, slnDir))];
 }
 
-static async Task PurgeProject(string projectFilePath, string targetPath, bool noClean, bool deleteVsFiles, CancellationToken cancellationToken)
-{
-    var projectDir = Path.GetDirectoryName(projectFilePath) ?? throw new InvalidOperationException($"Project directory could not be determined for path '{projectFilePath}'");
-
-    // Extract properties
-    var properties = await DotnetCli.GetProperties(projectFilePath, ProjectProperties.AllOutputDirs, cancellationToken);
-
-    if (!noClean)
-    {
-        // Run `dotnet clean` for each configuration
-        foreach (var key in properties.Keys)
-        {
-            var (configuration, targetFramework) = key;
-
-            string[] cleanArgs = ["--configuration", configuration, "-p:BuildProjectReferences=false"];
-            if (targetFramework is not null)
-            {
-                cleanArgs = [.. cleanArgs, "--framework", targetFramework];
-            }
-
-            // Calculate relative path from target directory to project file
-            var relativePath = GetRelativePath(targetPath, projectFilePath);
-            
-            var frameworkSuffix = targetFramework is not null ? $", {targetFramework}" : "";
-            AnsiConsole.MarkupLineInterpolated($"Cleaning [italic]{relativePath}[/] ({configuration}{frameworkSuffix}) ...");
-            //Write($"Running 'dotnet clean {relativePath} {string.Join(' ', cleanArgs)}'...");
-
-            await DotnetCli.Clean(projectFilePath, cleanArgs);
-
-            //AnsiConsole.MarkupLine(" [bold lime]done![/]");
-            //WriteLine(" done!", ConsoleColor.Green);
-        }
-    }
-
-    // Delete the output directories for each configuration
-    foreach (var key in properties.Keys)
-    {
-        var (configuration, _) = key;
-        var outputDirs = properties[key];
-
-        // Get the output directories paths
-        var dirsToDelete = outputDirs.Values.ToList();
-
-        var pathsToDelete = dirsToDelete
-            .Where(d => !string.IsNullOrEmpty(d))
-            .Select(d => Path.GetFullPath(d, projectDir))
-            .Where(d => Directory.Exists(d))
-            .OrderDescending()
-            .ToList();
-
-        // Delete the output directories
-        foreach (var dirPath in pathsToDelete)
-        {
-            if (Directory.Exists(dirPath) && !string.Equals(projectDir, dirPath, StringComparison.Ordinal))
-            {
-                Directory.Delete(dirPath, recursive: true);
-                var relativePath = GetRelativePath(targetPath, dirPath);
-                AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
-                //WriteLine($"Deleted '{relativePath}'");
-            }
-        }
-
-        // Check if output directories parent directories are now empty and delete them recursively
-        foreach (var dirPath in pathsToDelete)
-        {
-            DeleteEmptyParentDirectories(dirPath, targetPath);
-        }
-    }
-
-    if (deleteVsFiles)
-    {
-        // Delete Visual Studio related directories & files for this project
-        List<string> vsPaths = [
-            Path.Combine(projectDir, ".vs"),
-            $"{projectFilePath}.user"
-        ];
-
-        foreach (var path in vsPaths)
-        {
-            var deleted = false;
-            if (Directory.Exists(path))
-            {
-                Directory.Delete(path, recursive: true);
-                deleted = true;
-            }
-            else if (File.Exists(path))
-            {
-                File.Delete(path);
-                deleted = true;
-            }
-
-            if (deleted)
-            {
-                var relativePath = GetRelativePath(targetPath, path);
-                AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
-            }
-        }
-    }
-}
-
 static void DeleteVsDir(string targetPath, CancellationToken cancellationToken)
 {
     // Find the .vs directory by walking up the directory tree from the target directory until it's found
@@ -564,10 +464,21 @@ static void DeleteVsDir(string targetPath, CancellationToken cancellationToken)
         var vsDir = new DirectoryInfo(Path.Combine(dir.FullName, ".vs"));
         if (vsDir.Exists)
         {
-            vsDir.Delete(recursive: true);
-            var relativePath = GetRelativePath(targetPath, vsDir.FullName);
-            AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
-            //WriteLine($"Deleted '{relativePath}'");
+            var relativePath = GetRelativePath(Directory.GetCurrentDirectory(), vsDir.FullName);
+            try
+            {
+                vsDir.Delete(recursive: true);
+                AnsiConsole.MarkupLineInterpolated($"[green]✔️ Deleted [italic]{relativePath}[/][/]");
+            }
+            catch (IOException iox)
+            {
+                AnsiConsole.MarkupLineInterpolated(
+                    $$"""
+                    [red]❌ Failed to delete .vs directory at path: {{relativePath}}
+                    > {{iox.Message}}[/]
+                    """);
+            }
+            
             break;
         }
 
@@ -587,7 +498,7 @@ static void DeleteEmptyParentDirectories(string path, string targetPath)
     {
         dir.Delete();
         var relativePath = GetRelativePath(targetPath, dir.FullName);
-        AnsiConsole.MarkupLineInterpolated($"Deleted [italic]{relativePath}[/]");
+        AnsiConsole.MarkupLineInterpolated($"[green]✔️ Deleted [italic]{relativePath}[/][/]");
         dir = dir.Parent;
     }
 }
