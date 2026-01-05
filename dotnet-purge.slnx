@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/testprojects/">
+    <Project Path="tests/testprojects/ClassLibrary1/ClassLibrary1.csproj" />
+    <Project Path="tests/testprojects/ConsoleApp1/ConsoleApp1.csproj" />
+    <Project Path="tests/testprojects/EmptyWeb1/EmptyWeb1.csproj" />
+    <Project Path="tests/testprojects/RazorClassLibrary1/RazorClassLibrary1.csproj" />
+    <Project Path="tests/testprojects/SharedProject1/SharedProject1.shproj" />
+  </Folder>
+  <Project Path="src/dotnet-purge/dotnet-purge.csproj" />
+</Solution>

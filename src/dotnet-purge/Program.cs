@@ -446,7 +446,9 @@ static async Task<List<string>> GetSlnProjectFiles(string slnFilePath, Cancellat
         ?? throw new InvalidOperationException($"A solution file parser for file extension '{Path.GetExtension(slnFilePath)}' could not be not found.");
     var slnDir = Path.GetDirectoryName(slnFilePath) ?? throw new InvalidOperationException($"Solution directory could not be determined for path '{slnFilePath}'");
     var solution = await serializer.OpenAsync(slnFilePath, cancellationToken);
-    return [.. solution.SolutionProjects.Select(p => Path.GetFullPath(p.FilePath, slnDir))];
+    return [.. solution.SolutionProjects
+        .Where(p => !Path.GetExtension(p.FilePath).Equals(".shproj", StringComparison.OrdinalIgnoreCase))
+        .Select(p => Path.GetFullPath(p.FilePath, slnDir))];
 }
 
 static void DeleteVsDir(string targetPath, CancellationToken cancellationToken)
@@ -468,7 +470,7 @@ static void DeleteVsDir(string targetPath, CancellationToken cancellationToken)
             try
             {
                 vsDir.Delete(recursive: true);
-                AnsiConsole.MarkupLineInterpolated($"[green]✔️ Deleted [italic]{relativePath}[/][/]");
+                AnsiConsole.MarkupLineInterpolated($"[green]✅ Deleted [italic]{relativePath}[/][/]");
             }
             catch (IOException iox)
             {
@@ -498,7 +500,7 @@ static void DeleteEmptyParentDirectories(string path, string targetPath)
     {
         dir.Delete();
         var relativePath = GetRelativePath(targetPath, dir.FullName);
-        AnsiConsole.MarkupLineInterpolated($"[green]✔️ Deleted [italic]{relativePath}[/][/]");
+        AnsiConsole.MarkupLineInterpolated($"[green]✅ Deleted [italic]{relativePath}[/][/]");
         dir = dir.Parent;
     }
 }
