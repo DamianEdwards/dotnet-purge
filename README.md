@@ -30,6 +30,7 @@ Name           | Description
 -r, --recurse  | Find projects in sub-directories and purge those too.
 -n, --no-clean | Don't run `dotnet clean` before deleting the output directories.
 --vs           | Delete temporary files & directories created by Visual Studio, e.g. .vs, *.csproj.user.
+-d, --dry-run  | Show what would be deleted without actually deleting anything.
 
 ### Examples
 
