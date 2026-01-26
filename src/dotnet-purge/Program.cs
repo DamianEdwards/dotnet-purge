@@ -2,11 +2,13 @@
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net.Http.Json;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using Microsoft.VisualStudio.SolutionPersistence.Serializer;
 using NuGet.Versioning;
 using Spectre.Console;
@@ -645,7 +647,17 @@ static class DotnetCli
         {
             targetFrameworks = value.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         }
-        var isMultiTargeted = targetFrameworks?.Length > 1;
+        
+        var isMultiTargeted = targetFrameworks?.Length >= 1;
+        
+        // Alternative. Solution. The issue with targetFrameworks only appears to happen if it's .net 10.
+        // So instead of Length >= 1. We could revert back to Length > 1 and do something like below
+        // Regex netVersionRegex = new Regex("^net(?<version>\\d+\\.0)$");
+        // if (targetFrameworks is {Length: 1} && netVersionRegex.Match(targetFrameworks[0]) is {Success: true} match)
+        // {
+        //     var version = double.Parse(match.Groups["version"].Value, CultureInfo.InvariantCulture);
+        //     isMultiTargeted = version >= 10.0;
+        // }
 
         var result = new Dictionary<(string Configuration, string? TargetFramework), Dictionary<string, string>>();
 
