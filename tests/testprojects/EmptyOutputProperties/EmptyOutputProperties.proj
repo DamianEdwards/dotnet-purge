@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <Configurations>Debug</Configurations>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)bin\</BaseOutputPath>
+  </PropertyGroup>
+</Project>

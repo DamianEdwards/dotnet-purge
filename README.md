@@ -2,6 +2,7 @@
 
 .NET tool that runs `dotnet clean` for each target framework and configuration and then deletes the output directories.
 Can be run in a directory containing a solution or project file.
+Unset project output directories are ignored.
 
 ## Installation
 
