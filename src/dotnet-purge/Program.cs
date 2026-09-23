@@ -246,6 +246,7 @@ async Task<int> PurgeCommand(ParseResult parseResult, CancellationToken cancella
             var allOutputDirs = projectProperties.Values // (config, targetFramework), propertyName, directory
                 .SelectMany(d => d.Values) // propertyName, directory
                 .SelectMany(d => d.Values) // directory
+                .Where(static path => !string.IsNullOrWhiteSpace(path))
                 .OrderDescending()
                 .Distinct()
                 .ToList();
